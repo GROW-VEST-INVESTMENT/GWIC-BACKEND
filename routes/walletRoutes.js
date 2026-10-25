@@ -2,6 +2,7 @@ const express = require('express');
 const requireAuth = require('../middleware/requireAuth');
 const {
   getWallet,
+  getWalletTransactions,
   getBanks,
   initializeDeposit,
   verifyDeposit,
@@ -11,6 +12,7 @@ const {
 const router = express.Router();
 
 router.use(requireAuth);
+router.get('/transactions', getWalletTransactions);
 router.get('/', getWallet);
 router.get('/banks', getBanks);
 router.post('/deposits', initializeDeposit);

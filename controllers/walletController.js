@@ -7,6 +7,7 @@ const { paystackRequest, verifyWebhookSignature } = require('../services/paystac
 const MINIMUM_KOBO = 10000;
 const MAXIMUM_DEPOSIT_KOBO = 100000000;
 const MINIMUM_WITHDRAWAL_KOBO = 10000;
+const TRANSACTION_PAGE_SIZE = 20;
 
 function normalizeAccountName(value) {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -104,6 +105,49 @@ async function getWallet(req, res, next) {
         accountLast4: item.accountLast4,
         createdAt: item.createdAt,
       })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getWalletTransactions(req, res, next) {
+  const page = Number(req.query.page ?? 1);
+  const type = req.query.type ?? 'all';
+  if (!Number.isSafeInteger(page) || page < 1 || page > 100000) {
+    return res.status(400).json({ message: 'Choose a valid activity page.' });
+  }
+  if (!['all', 'deposit', 'withdrawal'].includes(type)) {
+    return res.status(400).json({ message: 'Choose a valid activity type.' });
+  }
+
+  try {
+    const filter = { userId: req.user.id };
+    if (type !== 'all') filter.type = type;
+    const [transactions, total] = await Promise.all([
+      WalletTransaction.find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((page - 1) * TRANSACTION_PAGE_SIZE)
+        .limit(TRANSACTION_PAGE_SIZE)
+        .select('reference type amountKobo status bankName accountLast4 createdAt')
+        .lean(),
+      WalletTransaction.countDocuments(filter),
+    ]);
+
+    return res.json({
+      transactions: transactions.map((item) => ({
+        reference: item.reference,
+        type: item.type,
+        amount: item.amountKobo / 100,
+        status: item.status,
+        bankName: item.bankName,
+        accountLast4: item.accountLast4,
+        createdAt: item.createdAt,
+      })),
+      page,
+      pageSize: TRANSACTION_PAGE_SIZE,
+      total,
+      hasMore: page * TRANSACTION_PAGE_SIZE < total,
     });
   } catch (error) {
     return next(error);
@@ -356,6 +400,7 @@ async function handlePaystackWebhook(req, res) {
 
 module.exports = {
   getWallet,
+  getWalletTransactions,
   getBanks,
   initializeDeposit,
   verifyDeposit,
