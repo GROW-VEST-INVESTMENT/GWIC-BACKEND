@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { after, test } = require('node:test');
-const { getWalletTransactions, normalizeAccountName } = require('../controllers/walletController');
+const {
+  createWithdrawal,
+  getWalletTransactions,
+  normalizeAccountName,
+  resolveWithdrawalAccount,
+} = require('../controllers/walletController');
 const { getPaystackSecret, paystackRequest, verifyWebhookSignature } = require('../services/paystack');
 const WalletTransaction = require('../models/WalletTransaction');
 
@@ -138,4 +143,100 @@ test('wallet activity endpoint returns a stable paginated response', async () =>
   assert.equal(responseBody.hasMore, true);
   assert.equal(responseBody.transactions[0].amount, 250);
   assert.equal(responseBody.transactions[0].reference, 'GWIC_DEP_test');
+});
+
+test('withdrawal confirmation requires a password and a version-4 idempotency key', async () => {
+  const validBody = {
+    amount: 100,
+    accountNumber: '0123456789',
+    bankCode: '044',
+    password: 'correct horse battery staple',
+    idempotencyKey: '123e4567-e89b-42d3-a456-426614174000',
+  };
+
+  for (const body of [
+    { ...validBody, password: '' },
+    { ...validBody, idempotencyKey: 'not-a-uuid' },
+  ]) {
+    let status;
+    let responseBody;
+    await createWithdrawal(
+      { body, user: { id: 'user-1' } },
+      {
+        status(value) { status = value; return this; },
+        json(value) { responseBody = value; return value; },
+      },
+      (error) => { throw error; },
+    );
+    assert.equal(status, 400);
+    assert.match(responseBody.message, /password|confirmation/i);
+  }
+});
+
+test('an idempotent withdrawal retry returns the existing request without another payout', async () => {
+  const originalFindOne = WalletTransaction.findOne;
+  WalletTransaction.findOne = async () => ({
+    reference: 'GWIC_WD_existing',
+    status: 'processing',
+  });
+  let status;
+  let responseBody;
+  try {
+    await createWithdrawal(
+      {
+        body: {
+          amount: 100,
+          accountNumber: '0123456789',
+          bankCode: '044',
+          password: 'correct horse battery staple',
+          idempotencyKey: '123e4567-e89b-42d3-a456-426614174000',
+        },
+        user: { id: 'user-1' },
+      },
+      {
+        status(value) { status = value; return this; },
+        json(value) { responseBody = value; return value; },
+      },
+      (error) => { throw error; },
+    );
+  } finally {
+    WalletTransaction.findOne = originalFindOne;
+  }
+
+  assert.equal(status, 202);
+  assert.equal(responseBody.reference, 'GWIC_WD_existing');
+  assert.equal(responseBody.status, 'processing');
+});
+
+test('bank verification returns only the masked account details for review', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const data = String(url).includes('/bank/resolve')
+      ? { account_name: 'Ada Example' }
+      : [{ name: 'Example Bank', code: '044' }];
+    return new Response(JSON.stringify({ status: true, data }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+  let responseBody;
+  try {
+    await resolveWithdrawalAccount(
+      {
+        body: { accountNumber: '0123456789', bankCode: '044' },
+        user: { name: 'Ada Example' },
+      },
+      { json(value) { responseBody = value; return value; } },
+      (error) => { throw error; },
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.deepEqual(responseBody, {
+    accountName: 'Ada Example',
+    bankName: 'Example Bank',
+    accountLast4: '6789',
+  });
+  assert.equal(Object.hasOwn(responseBody, 'accountNumber'), false);
 });

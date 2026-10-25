@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const walletTransactionSchema = new mongoose.Schema(
   {
     reference: { type: String, required: true, unique: true, index: true },
+    idempotencyKey: { type: String, unique: true, sparse: true },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

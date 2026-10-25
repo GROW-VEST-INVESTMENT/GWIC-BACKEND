@@ -6,6 +6,7 @@ const {
   getBanks,
   initializeDeposit,
   verifyDeposit,
+  resolveWithdrawalAccount,
   createWithdrawal,
 } = require('../controllers/walletController');
 
@@ -17,6 +18,7 @@ router.get('/', getWallet);
 router.get('/banks', getBanks);
 router.post('/deposits', initializeDeposit);
 router.post('/deposits/verify', verifyDeposit);
+router.post('/withdrawals/resolve', resolveWithdrawalAccount);
 router.post('/withdrawals', createWithdrawal);
 
 module.exports = router;

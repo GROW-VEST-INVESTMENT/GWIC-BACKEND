@@ -1,7 +1,9 @@
 const crypto = require('node:crypto');
+const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
+const User = require('../models/User');
 const { paystackRequest, verifyWebhookSignature } = require('../services/paystack');
 
 const MINIMUM_KOBO = 10000;
@@ -165,6 +167,48 @@ async function getBanks(req, res, next) {
   }
 }
 
+function validateBankDetails(accountNumber, bankCode) {
+  return typeof accountNumber === 'string'
+    && /^\d{10}$/.test(accountNumber)
+    && typeof bankCode === 'string'
+    && /^[A-Za-z0-9_-]{2,20}$/.test(bankCode);
+}
+
+async function resolveBankAccount(accountNumber, bankCode, profileName) {
+  const account = await paystackRequest(
+    `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
+  );
+  if (normalizeAccountName(account.account_name || '') !== normalizeAccountName(profileName)) {
+    const error = new Error('The bank account holder name must match your GWIC profile name. No withdrawal was made.');
+    error.status = 422;
+    throw error;
+  }
+
+  const banks = await paystackRequest('/bank?country=nigeria&use_cursor=false&perPage=100');
+  return {
+    accountName: account.account_name,
+    bankName: banks.find((bank) => bank.code === bankCode)?.name || 'Bank account',
+  };
+}
+
+async function resolveWithdrawalAccount(req, res, next) {
+  const { accountNumber, bankCode } = req.body || {};
+  if (!validateBankDetails(accountNumber, bankCode)) {
+    return res.status(400).json({ message: 'Enter a valid Nigerian bank and 10-digit account number.' });
+  }
+
+  try {
+    const account = await resolveBankAccount(accountNumber, bankCode, req.user.name);
+    return res.json({
+      accountName: account.accountName,
+      bankName: account.bankName,
+      accountLast4: accountNumber.slice(-4),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function initializeDeposit(req, res, next) {
   const amountNaira = req.body?.amount;
   if (!Number.isSafeInteger(amountNaira) || amountNaira * 100 < MINIMUM_KOBO || amountNaira * 100 > MAXIMUM_DEPOSIT_KOBO) {
@@ -236,7 +280,13 @@ async function verifyDeposit(req, res, next) {
 }
 
 async function createWithdrawal(req, res, next) {
-  const { amount: amountNaira, accountNumber, bankCode } = req.body || {};
+  const {
+    amount: amountNaira,
+    accountNumber,
+    bankCode,
+    password,
+    idempotencyKey,
+  } = req.body || {};
   if (
     !Number.isSafeInteger(amountNaira)
     || !Number.isSafeInteger(amountNaira * 100)
@@ -244,39 +294,49 @@ async function createWithdrawal(req, res, next) {
   ) {
     return res.status(400).json({ message: 'The minimum withdrawal is ₦100.' });
   }
-  if (
-    typeof accountNumber !== 'string'
-    || !/^\d{10}$/.test(accountNumber)
-    || typeof bankCode !== 'string'
-    || !/^[A-Za-z0-9_-]{2,20}$/.test(bankCode)
-  ) {
+  if (!validateBankDetails(accountNumber, bankCode)) {
     return res.status(400).json({ message: 'Enter a valid Nigerian bank and 10-digit account number.' });
+  }
+  if (typeof password !== 'string' || !password || Buffer.byteLength(password, 'utf8') > 72) {
+    return res.status(400).json({ message: 'Enter your password to confirm this withdrawal.' });
+  }
+  if (
+    typeof idempotencyKey !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)
+  ) {
+    return res.status(400).json({ message: 'This withdrawal confirmation has expired. Review the withdrawal again.' });
   }
 
   let transaction;
   let transferAttempted = false;
   try {
+    const existing = await WalletTransaction.findOne({ idempotencyKey, userId: req.user.id });
+    if (existing) {
+      return res.status(202).json({
+        message: existing.status === 'failed' || existing.status === 'reversed'
+          ? 'This withdrawal request has already ended. Start a new request if you still want to withdraw.'
+          : 'This withdrawal request has already been submitted. Check its status in Activity.',
+        reference: existing.reference,
+        status: existing.status,
+      });
+    }
+
     const availableWallet = await Wallet.findOne({ userId: req.user.id }).select('balanceKobo').lean();
     if (!availableWallet || availableWallet.balanceKobo < amountNaira * 100) {
       return res.status(400).json({ message: 'Your available wallet balance is too low for this withdrawal.' });
     }
 
-    const account = await paystackRequest(
-      `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
-    );
-    if (normalizeAccountName(account.account_name || '') !== normalizeAccountName(req.user.name)) {
-      return res.status(422).json({
-        message: 'The bank account holder name must match your GWIC profile name. No withdrawal was made.',
-      });
+    const user = await User.findById(req.user.id).select('+passwordHash name');
+    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+      return res.status(403).json({ message: 'Your password could not be confirmed. Check it and try again.' });
     }
 
-    const banks = await paystackRequest('/bank?country=nigeria&use_cursor=false&perPage=100');
-    const bankName = banks.find((bank) => bank.code === bankCode)?.name || 'Bank account';
+    const account = await resolveBankAccount(accountNumber, bankCode, user.name);
     const recipient = await paystackRequest('/transferrecipient', {
       method: 'POST',
       body: JSON.stringify({
         type: 'nuban',
-        name: account.account_name,
+        name: account.accountName,
         account_number: accountNumber,
         bank_code: bankCode,
         currency: 'NGN',
@@ -297,13 +357,14 @@ async function createWithdrawal(req, res, next) {
         await wallet.save({ session });
         [transaction] = await WalletTransaction.create([{
           reference: `GWIC_WD_${crypto.randomUUID()}`,
+          idempotencyKey,
           userId: req.user.id,
           type: 'withdrawal',
           amountKobo,
           status: 'processing',
           recipientCode: recipient.recipient_code,
-          accountName: account.account_name,
-          bankName,
+          accountName: account.accountName,
+          bankName: account.bankName,
           accountLast4: accountNumber.slice(-4),
         }], { session });
       });
@@ -338,6 +399,16 @@ async function createWithdrawal(req, res, next) {
       status: transferStatus,
     });
   } catch (error) {
+    if (error.code === 11000 && typeof idempotencyKey === 'string') {
+      const existing = await WalletTransaction.findOne({ idempotencyKey, userId: req.user.id });
+      if (existing) {
+        return res.status(202).json({
+          message: 'This withdrawal request has already been submitted. Check its status in Activity.',
+          reference: existing.reference,
+          status: existing.status,
+        });
+      }
+    }
     if (transaction && (!transferAttempted || error.status === 400)) {
       await refundWithdrawal(transaction, 'failed', 'The transfer could not be started.');
     }
@@ -404,6 +475,7 @@ module.exports = {
   getBanks,
   initializeDeposit,
   verifyDeposit,
+  resolveWithdrawalAccount,
   createWithdrawal,
   handlePaystackWebhook,
   normalizeAccountName,
