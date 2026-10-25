@@ -9,7 +9,13 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Test Route
+app.get('/', (req, res) => {
+  res.json({
+    message: 'GWIC Backend API is running.',
+    health: '/api/health',
+  });
+});
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'GWIC Backend is running successfully!' });
 });
