@@ -199,7 +199,9 @@ app.use((error, req, res, next) => {
     ? error.status
     : 500;
   return res.status(status).json({
-    message: status < 500 ? error.message : 'Something went wrong. Please try again.',
+    message: error.code === 'PAYSTACK_AUTH'
+      ? error.message
+      : status < 500 ? error.message : 'Something went wrong. Please try again.',
   });
 });
 
