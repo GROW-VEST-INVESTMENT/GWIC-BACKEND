@@ -9,6 +9,8 @@ const User = require('./models/User');
 const requireAuth = require('./middleware/requireAuth');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const coreLockRoutes = require('./routes/coreLockRoutes');
+const walletRoutes = require('./routes/walletRoutes');
+const { handlePaystackWebhook } = require('./controllers/walletController');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -30,9 +32,11 @@ app.use(cors({
     callback(null, !origin || allowedOrigins.includes(origin));
   },
 }));
+app.post('/api/paystack/webhook', express.raw({ type: 'application/json', limit: '64kb' }), handlePaystackWebhook);
 app.use(express.json({ limit: '16kb' }));
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/core-lock', coreLockRoutes);
+app.use('/api/wallet', walletRoutes);
 
 app.get('/', (req, res) => {
   res.json({
@@ -191,8 +195,11 @@ app.use((error, req, res, next) => {
   if (res.headersSent) {
     return next(error);
   }
-  return res.status(error.status === 400 ? 400 : 500).json({
-    message: error.status === 400 ? 'Invalid request body.' : 'Something went wrong. Please try again.',
+  const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 500
+    ? error.status
+    : 500;
+  return res.status(status).json({
+    message: status < 500 ? error.message : 'Something went wrong. Please try again.',
   });
 });
 
