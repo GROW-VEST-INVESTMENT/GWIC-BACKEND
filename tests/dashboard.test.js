@@ -132,7 +132,15 @@ test('dashboard returns saved goal planning details', async () => {
   });
   const response = makeResponse();
   try {
-    await getDashboard({ user: { id: 'user-1', name: 'Ada Example', email: 'ada@example.com' } }, response, (error) => { throw error; });
+    await getDashboard({
+      user: {
+        id: 'user-1',
+        name: 'Ada Example',
+        email: 'ada@example.com',
+        phone: '+2348000000000',
+        isKycVerified: true,
+      },
+    }, response, (error) => { throw error; });
   } finally {
     SavingsGoal.find = originalFind;
   }
@@ -141,4 +149,6 @@ test('dashboard returns saved goal planning details', async () => {
   assert.equal(response.body.savingsGoals[0].planDurationDays, 90);
   assert.equal(response.body.savingsGoals[0].plannedContributionAmount, 25000);
   assert.equal(response.body.savingsGoals[0].plannedContributionFrequency, 'weekly');
+  assert.equal(response.body.user.phone, '+2348000000000');
+  assert.equal(response.body.user.isKycVerified, true);
 });

@@ -12,6 +12,8 @@ async function getDashboard(req, res, next) {
         id: req.user.id,
         name: req.user.name,
         email: req.user.email,
+        phone: req.user.phone || '',
+        isKycVerified: req.user.isKycVerified === true,
       },
       balances: {
         currency: 'NGN',
