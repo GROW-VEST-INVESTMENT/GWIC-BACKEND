@@ -21,6 +21,7 @@ const walletTransactionSchema = new mongoose.Schema(
     authorizationUrl: { type: String, default: null },
     transferCode: { type: String, default: null },
     recipientCode: { type: String, default: null },
+    linkedBankAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'LinkedBankAccount', default: null },
     accountName: { type: String, default: null },
     bankName: { type: String, default: null },
     accountLast4: { type: String, default: null },

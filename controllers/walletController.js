@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
+const LinkedBankAccount = require('../models/LinkedBankAccount');
 const { paystackRequest, verifyWebhookSignature } = require('../services/paystack');
 const { createJournal } = require('../services/coreSavings');
 const { getOrCreateWallet } = require('../services/wallet');
@@ -298,6 +299,7 @@ async function createWithdrawal(req, res, next) {
     amount: amountNaira,
     accountNumber,
     bankCode,
+    linkedBankAccountId,
     password,
     idempotencyKey,
   } = req.body || {};
@@ -308,7 +310,10 @@ async function createWithdrawal(req, res, next) {
   ) {
     return res.status(400).json({ message: 'The minimum withdrawal is ₦100.' });
   }
-  if (!validateBankDetails(accountNumber, bankCode)) {
+  const usesLinkedBank = typeof linkedBankAccountId === 'string'
+    && mongoose.isValidObjectId(linkedBankAccountId);
+  if ((!usesLinkedBank && !validateBankDetails(accountNumber, bankCode))
+    || (linkedBankAccountId !== undefined && !usesLinkedBank)) {
     return res.status(400).json({ message: 'Enter a valid Nigerian bank and 10-digit account number.' });
   }
   if (typeof password !== 'string' || !password || Buffer.byteLength(password, 'utf8') > 72) {
@@ -345,17 +350,37 @@ async function createWithdrawal(req, res, next) {
       return res.status(403).json({ message: 'Your password could not be confirmed. Check it and try again.' });
     }
 
-    const account = await resolveBankAccount(accountNumber, bankCode, user.name);
-    const recipient = await paystackRequest('/transferrecipient', {
-      method: 'POST',
-      body: JSON.stringify({
-        type: 'nuban',
-        name: account.accountName,
-        account_number: accountNumber,
-        bank_code: bankCode,
-        currency: 'NGN',
-      }),
-    });
+    let account;
+    let recipient;
+    if (usesLinkedBank) {
+      const linkedBank = await LinkedBankAccount.findOne({
+        _id: linkedBankAccountId,
+        userId: req.user.id,
+      }).select('+recipientCode');
+      if (!linkedBank) {
+        return res.status(404).json({ message: 'The selected linked bank account was not found.' });
+      }
+      account = {
+        accountName: linkedBank.accountName,
+        bankName: linkedBank.bankName,
+        accountLast4: linkedBank.accountLast4,
+        linkedBankAccountId: linkedBank.id,
+      };
+      recipient = { recipient_code: linkedBank.recipientCode };
+    } else {
+      account = await resolveBankAccount(accountNumber, bankCode, user.name);
+      account.accountLast4 = accountNumber.slice(-4);
+      recipient = await paystackRequest('/transferrecipient', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'nuban',
+          name: account.accountName,
+          account_number: accountNumber,
+          bank_code: bankCode,
+          currency: 'NGN',
+        }),
+      });
+    }
 
     const session = await mongoose.startSession();
     try {
@@ -390,7 +415,8 @@ async function createWithdrawal(req, res, next) {
           recipientCode: recipient.recipient_code,
           accountName: account.accountName,
           bankName: account.bankName,
-          accountLast4: accountNumber.slice(-4),
+          accountLast4: account.accountLast4,
+          linkedBankAccountId: account.linkedBankAccountId || null,
         }], { session });
       });
     } finally {

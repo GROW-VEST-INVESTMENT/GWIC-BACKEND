@@ -1,4 +1,5 @@
 const SavingsGoal = require('../models/SavingsGoal');
+const { getProfilePhotoUrl } = require('../services/profilePhotoStorage');
 
 const LOCK_PERIODS = [30, 90, 180, 365];
 
@@ -12,6 +13,7 @@ async function getCoreLock(req, res, next) {
       user: {
         id: req.user.id,
         name: req.user.name,
+        photoUrl: getProfilePhotoUrl(req.user.profilePhotoPublicId, req.user.profilePhotoVersion),
       },
       status: 'coming-soon',
       currency: 'NGN',

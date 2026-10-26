@@ -1,4 +1,5 @@
 const SavingsGoal = require('../models/SavingsGoal');
+const { getProfilePhotoUrl } = require('../services/profilePhotoStorage');
 
 async function getDashboard(req, res, next) {
   try {
@@ -14,6 +15,7 @@ async function getDashboard(req, res, next) {
         email: req.user.email,
         phone: req.user.phone || '',
         isKycVerified: req.user.isKycVerified === true,
+        photoUrl: getProfilePhotoUrl(req.user.profilePhotoPublicId, req.user.profilePhotoVersion),
       },
       balances: {
         currency: 'NGN',

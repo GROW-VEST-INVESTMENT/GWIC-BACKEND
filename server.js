@@ -11,6 +11,8 @@ const dashboardRoutes = require('./routes/dashboardRoutes');
 const coreLockRoutes = require('./routes/coreLockRoutes');
 const coreSavingsRoutes = require('./routes/coreSavingsRoutes');
 const walletRoutes = require('./routes/walletRoutes');
+const accountRoutes = require('./routes/accountRoutes');
+const accountReviewRoutes = require('./routes/accountReviewRoutes');
 const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
@@ -40,6 +42,8 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/core-lock', coreLockRoutes);
 app.use('/api/core-savings', coreSavingsRoutes);
 app.use('/api/wallet', walletRoutes);
+app.use('/api/account', accountRoutes);
+app.use('/api/account-review', accountReviewRoutes);
 
 app.get('/', (req, res) => {
   res.json({
@@ -76,7 +80,7 @@ app.post('/api/auth/register', async (req, res, next) => {
     return res.status(400).json({ message: 'Please complete all required fields.' });
   }
 
-  const normalizedName = name.trim();
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
   const normalizedEmail = email.trim().toLowerCase();
   const normalizedPhone = phone.trim();
 
@@ -92,6 +96,9 @@ app.post('/api/auth/register', async (req, res, next) => {
     || !User.PRODUCTS.includes(product)
   ) {
     return res.status(400).json({ message: 'Please check your details and try again.' });
+  }
+  if (!/^\S+(?:\s+\S+)+$/.test(normalizedName)) {
+    return res.status(400).json({ message: 'Enter your full legal name as it appears on your bank account and identity records.' });
   }
 
   if (mongoose.connection.readyState !== 1) {
