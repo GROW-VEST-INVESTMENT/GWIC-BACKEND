@@ -5,6 +5,8 @@ const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
 const { paystackRequest, verifyWebhookSignature } = require('../services/paystack');
+const { createJournal } = require('../services/coreSavings');
+const { getOrCreateWallet } = require('../services/wallet');
 
 const MINIMUM_KOBO = 10000;
 const MAXIMUM_DEPOSIT_KOBO = 100000000;
@@ -13,16 +15,6 @@ const TRANSACTION_PAGE_SIZE = 20;
 
 function normalizeAccountName(value) {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-async function getOrCreateWallet(userId, session) {
-  let query = Wallet.findOne({ userId });
-  if (session) query = query.session(session);
-  let wallet = await query;
-  if (!wallet) {
-    [wallet] = await Wallet.create([{ userId, balanceKobo: 0 }], session ? { session } : {});
-  }
-  return wallet;
 }
 
 async function creditVerifiedDeposit(transaction) {
@@ -36,6 +28,17 @@ async function creditVerifiedDeposit(transaction) {
       const wallet = await getOrCreateWallet(current.userId, session);
       wallet.balanceKobo += current.amountKobo;
       await wallet.save({ session });
+      await createJournal({
+        session,
+        idempotencyKey: `wallet-deposit:${current.reference}`,
+        transactionType: 'DEPOSIT',
+        description: 'Verified Paystack wallet deposit.',
+        timestamp: new Date(),
+        postings: [
+          { userId: null, accountCode: 'PAYSTACK_CLEARING', amountKobo: current.amountKobo, entryType: 'DEBIT' },
+          { userId: current.userId, accountCode: 'USER_WALLET', amountKobo: current.amountKobo, entryType: 'CREDIT' },
+        ],
+      });
       current.status = 'successful';
       await current.save({ session });
     });
@@ -53,6 +56,17 @@ async function refundWithdrawal(transaction, status, reason = null) {
       const wallet = await getOrCreateWallet(current.userId, session);
       wallet.balanceKobo += current.amountKobo;
       await wallet.save({ session });
+      await createJournal({
+        session,
+        idempotencyKey: `wallet-withdrawal-refund:${current.reference}`,
+        transactionType: 'WITHDRAWAL',
+        description: 'Refund of an unsuccessful wallet withdrawal.',
+        timestamp: new Date(),
+        postings: [
+          { userId: null, accountCode: 'PAYSTACK_CLEARING', amountKobo: current.amountKobo, entryType: 'DEBIT' },
+          { userId: current.userId, accountCode: 'USER_WALLET', amountKobo: current.amountKobo, entryType: 'CREDIT' },
+        ],
+      });
       current.status = status;
       current.failureReason = reason;
       current.refundedAt = new Date();
@@ -355,6 +369,17 @@ async function createWithdrawal(req, res, next) {
         }
         wallet.balanceKobo -= amountKobo;
         await wallet.save({ session });
+        await createJournal({
+          session,
+          idempotencyKey: `wallet-withdrawal:${idempotencyKey}`,
+          transactionType: 'WITHDRAWAL',
+          description: 'Wallet withdrawal reserved for Paystack transfer.',
+          timestamp: new Date(),
+          postings: [
+            { userId: req.user.id, accountCode: 'USER_WALLET', amountKobo, entryType: 'DEBIT' },
+            { userId: null, accountCode: 'PAYSTACK_CLEARING', amountKobo, entryType: 'CREDIT' },
+          ],
+        });
         [transaction] = await WalletTransaction.create([{
           reference: `GWIC_WD_${crypto.randomUUID()}`,
           idempotencyKey,

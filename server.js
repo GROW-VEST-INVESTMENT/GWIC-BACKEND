@@ -9,7 +9,9 @@ const User = require('./models/User');
 const requireAuth = require('./middleware/requireAuth');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const coreLockRoutes = require('./routes/coreLockRoutes');
+const coreSavingsRoutes = require('./routes/coreSavingsRoutes');
 const walletRoutes = require('./routes/walletRoutes');
+const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
 const app = express();
@@ -36,6 +38,7 @@ app.post('/api/paystack/webhook', express.raw({ type: 'application/json', limit:
 app.use(express.json({ limit: '16kb' }));
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/core-lock', coreLockRoutes);
+app.use('/api/core-savings', coreSavingsRoutes);
 app.use('/api/wallet', walletRoutes);
 
 app.get('/', (req, res) => {
@@ -215,6 +218,7 @@ async function startServer() {
 
   await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
   console.log('MongoDB connected.');
+  startCoreSavingsScheduler();
   return app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

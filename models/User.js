@@ -19,6 +19,7 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, trim: true, maxlength: 32, default: '' },
     goal: { type: String, required: true, enum: GOALS },
     product: { type: String, required: true, enum: PRODUCTS },
+    isKycVerified: { type: Boolean, default: false, required: true },
     passwordHash: { type: String, required: true, select: false },
     sessionVersion: { type: Number, default: 0 },
   },
