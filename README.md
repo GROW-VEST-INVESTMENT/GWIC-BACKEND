@@ -20,7 +20,7 @@ Paystack can require approval for transfers depending on the account's transfer 
 
 The authenticated `GET /api/wallet/transactions?page=1&type=all` endpoint returns wallet activity newest-first in pages of 20. `type` accepts `all`, `deposit`, or `withdrawal`; the response includes `total` and `hasMore` for pagination.
 
-The authenticated `GET /api/portfolio` endpoint summarizes a user's current wallet balance and active Core savings plans. It reports current account allocation and accrued yield only; historical performance and securities holdings are not represented because those products and market-data feeds are not integrated.
+The authenticated `GET /api/portfolio` endpoint summarizes a user's current wallet balance, active Core savings plans, and balances saved toward user-created savings goals. Savings-goal balances are included in the portfolio total and reported separately from the available wallet balance. The endpoint reports current account allocation and accrued yield only; historical performance and securities holdings are not represented because those products and market-data feeds are not integrated.
 
 ## Core savings operations
 

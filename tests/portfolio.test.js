@@ -1,14 +1,17 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const InvestmentPlan = require('../models/InvestmentPlan');
+const SavingsGoal = require('../models/SavingsGoal');
 const Wallet = require('../models/Wallet');
 const { getPortfolio } = require('../controllers/portfolioController');
 
-test('portfolio totals use the authenticated user wallet and active Core savings plans', async () => {
+test('portfolio totals include the authenticated user wallet, active Core plans, and savings goals', async () => {
   const originalWalletFindOne = Wallet.findOne;
   const originalInvestmentFind = InvestmentPlan.find;
+  const originalSavingsGoalFind = SavingsGoal.find;
   let walletQuery;
   let planQuery;
+  let savingsGoalQuery;
   Wallet.findOne = (query) => {
     walletQuery = query;
     return { select: () => ({ lean: async () => ({ balanceKobo: 8043250 }) }) };
@@ -45,6 +48,25 @@ test('portfolio totals use the authenticated user wallet and active Core savings
       },
     };
   };
+  SavingsGoal.find = (query) => {
+    savingsGoalQuery = query;
+    return {
+      sort() { return this; },
+      select() {
+        return {
+          lean: async () => [
+            {
+              _id: { toString: () => 'goal-travel' },
+              name: 'Travel Fund',
+              savedAmount: 25000,
+              targetDate: new Date('2026-12-31T00:00:00.000Z'),
+              planDurationDays: 180,
+            },
+          ],
+        };
+      },
+    };
+  };
 
   let responseBody;
   try {
@@ -56,13 +78,16 @@ test('portfolio totals use the authenticated user wallet and active Core savings
   } finally {
     Wallet.findOne = originalWalletFindOne;
     InvestmentPlan.find = originalInvestmentFind;
+    SavingsGoal.find = originalSavingsGoalFind;
   }
 
   assert.deepEqual(walletQuery, { userId: 'user-portfolio' });
   assert.deepEqual(planQuery, { userId: 'user-portfolio', status: 'ACTIVE' });
+  assert.deepEqual(savingsGoalQuery, { userId: 'user-portfolio' });
   assert.equal(responseBody.currency, 'NGN');
-  assert.equal(responseBody.portfolioValue, 1395432.5);
+  assert.equal(responseBody.portfolioValue, 1420432.5);
   assert.equal(responseBody.availableBalance, 80432.5);
+  assert.equal(responseBody.savingsBalance, 25000);
   assert.equal(responseBody.investedPrincipal, 1300000);
   assert.equal(responseBody.accruedYield, 15000);
   assert.equal(responseBody.performanceHistoryAvailable, false);
@@ -71,16 +96,34 @@ test('portfolio totals use the authenticated user wallet and active Core savings
   assert.deepEqual(responseBody.allocations, [
     { type: 'core-target', label: 'Core Target', amount: 302500 },
     { type: 'core-lock', label: 'Core Lock', amount: 1012500 },
+    { type: 'savings', label: 'Savings', amount: 25000 },
     { type: 'cash', label: 'Cash Balance', amount: 80432.5 },
   ]);
-  assert.equal(responseBody.holdings.length, 2);
+  assert.equal(responseBody.holdings.length, 3);
+  assert.deepEqual(responseBody.holdings[2], {
+    id: 'goal-travel',
+    type: 'SAVINGS',
+    name: 'Travel Fund',
+    principal: 25000,
+    accruedYield: 0,
+    currentValue: 25000,
+    annualYieldPercent: null,
+    lockPeriodDays: 180,
+    startDate: null,
+    maturityDate: new Date('2026-12-31T00:00:00.000Z'),
+  });
 });
 
-test('portfolio returns zero balances when a user has no wallet or active plans', async () => {
+test('portfolio returns zero balances when a user has no wallet, plans, or saved goals', async () => {
   const originalWalletFindOne = Wallet.findOne;
   const originalInvestmentFind = InvestmentPlan.find;
+  const originalSavingsGoalFind = SavingsGoal.find;
   Wallet.findOne = () => ({ select: () => ({ lean: async () => null }) });
   InvestmentPlan.find = () => ({
+    sort() { return this; },
+    select() { return { lean: async () => [] }; },
+  });
+  SavingsGoal.find = () => ({
     sort() { return this; },
     select() { return { lean: async () => [] }; },
   });
@@ -94,9 +137,11 @@ test('portfolio returns zero balances when a user has no wallet or active plans'
   } finally {
     Wallet.findOne = originalWalletFindOne;
     InvestmentPlan.find = originalInvestmentFind;
+    SavingsGoal.find = originalSavingsGoalFind;
   }
 
   assert.equal(responseBody.portfolioValue, 0);
+  assert.equal(responseBody.savingsBalance, 0);
   assert.equal(responseBody.holdings.length, 0);
 });
 
