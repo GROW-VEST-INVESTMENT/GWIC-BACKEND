@@ -13,6 +13,7 @@ const coreSavingsRoutes = require('./routes/coreSavingsRoutes');
 const walletRoutes = require('./routes/walletRoutes');
 const accountRoutes = require('./routes/accountRoutes');
 const accountReviewRoutes = require('./routes/accountReviewRoutes');
+const portfolioRoutes = require('./routes/portfolioRoutes');
 const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
@@ -44,6 +45,7 @@ app.use('/api/core-savings', coreSavingsRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/account-review', accountReviewRoutes);
+app.use('/api/portfolio', portfolioRoutes);
 
 app.get('/', (req, res) => {
   res.json({
