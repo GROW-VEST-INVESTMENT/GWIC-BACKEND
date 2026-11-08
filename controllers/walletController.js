@@ -194,7 +194,7 @@ async function resolveBankAccount(accountNumber, bankCode, profileName) {
     `/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
   );
   if (normalizeAccountName(account.account_name || '') !== normalizeAccountName(profileName)) {
-    const error = new Error('The bank account holder name must match your GWIC profile name. No withdrawal was made.');
+    const error = new Error('The bank account holder name must match your Kalma Capital profile name. No withdrawal was made.');
     error.status = 422;
     throw error;
   }
@@ -430,7 +430,7 @@ async function createWithdrawal(req, res, next) {
         source: 'balance',
         amount: transaction.amountKobo,
         recipient: recipient.recipient_code,
-        reason: 'GWIC wallet withdrawal',
+        reason: 'Kalma Capital wallet withdrawal',
         reference: transaction.reference,
       }),
     });

@@ -243,7 +243,7 @@ async function getNotificationPreferences(req, res, next) {
     return res.json({
       preferences: user.notificationPreferences.toObject(),
       delivery: { email: false, push: false },
-      message: 'Your choices are saved. Notification delivery will be available when GWIC connects its messaging providers.',
+      message: 'Your choices are saved. Notification delivery will be available when Kalma Capital connects its messaging providers.',
     });
   } catch (error) {
     return next(error);
@@ -434,7 +434,7 @@ async function createLinkedBank(req, res, next) {
       typeof accountName !== 'string'
       || normalizeAccountName(accountName) !== normalizeAccountName(user.name)
     ) {
-      return sendError(res, 422, 'The bank account holder name must match your GWIC profile name.');
+      return sendError(res, 422, 'The bank account holder name must match your Kalma Capital profile name.');
     }
     const availableBanks = await paystackRequest('/bank?country=nigeria&use_cursor=false&perPage=100');
     const bank = availableBanks.find((item) => item.code === bankCode);
@@ -579,8 +579,10 @@ async function createSupportRequest(req, res, next) {
 
 function getAbout(_req, res) {
   return res.json({
-    name: 'Grow With Core',
-    shortName: 'GWIC',
+    name: 'Kalma Capital',
+    shortName: 'KC',
+    parentCompany: 'GWIC',
+    tagline: 'Grow with Core',
     description: 'Better habits. Stronger finances. A brighter future.',
     products: ['Core Lock', 'Equity Core'],
     support: { availableInApp: true },

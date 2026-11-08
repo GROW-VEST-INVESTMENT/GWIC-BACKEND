@@ -1,4 +1,4 @@
-# GWIC backend
+# Kalma Capital backend
 
 ## Paystack wallet setup
 
@@ -34,7 +34,7 @@ The API starts a UTC-midnight scheduler after connecting to MongoDB; it also run
 
 ## Account settings and support
 
-Signup requires at least a first and last name. Tell users to enter their full legal name as it appears on bank and identity records: bank withdrawals are rejected when the verified bank-account holder name does not match the GWIC profile name. The name is immutable through the regular profile endpoint; users can submit a support request for a correction.
+Signup requires at least a first and last name. Tell users to enter their full legal name as it appears on bank and identity records: bank withdrawals are rejected when the verified bank-account holder name does not match the Kalma Capital profile name. The name is immutable through the regular profile endpoint; users can submit a support request for a correction.
 
 Optional profile photos are uploaded through the authenticated `/api/account/profile/photo` route and stored as authenticated Cloudinary images. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend environment. Only PNG, JPEG, and WebP files under 2 MB are accepted. The API returns a signed image URL; photos are not identity evidence and must not be used for face verification. `DELETE /api/account/profile/photo` removes the current profile photo.
 
@@ -45,8 +45,24 @@ The authenticated `/api/account` routes power the More page:
 - `GET/PATCH /notifications` persists the user's choices. Email and push delivery are not integrated yet; saving a choice does not send a notification.
 - `PATCH /password` verifies the current password, changes it, invalidates prior sessions, and clears the current session cookie.
 - `GET/POST /verification` reads or submits a manual verification request. It collects legal name and date of birth, not BVN or identity-document numbers. A request is not proof of verification; a reviewer must validate it separately before account KYC status changes.
-- `GET/POST /banks`, `PATCH /banks/:bankId/default`, and `DELETE /banks/:bankId` manage up to three verified payout recipients. Linking requires Paystack configuration, password confirmation, and a holder name matching the GWIC profile. Plain account numbers are not stored; only masked details and a provider recipient reference are retained. A linked account can be selected for wallet withdrawals.
-- `GET/POST /support` lists and creates support tickets. Ticket handling is manual; no email delivery or staff dashboard is connected.
+- `GET/POST /banks`, `PATCH /banks/:bankId/default`, and `DELETE /banks/:bankId` manage up to three verified payout recipients. Linking requires Paystack configuration, password confirmation, and a holder name matching the Kalma Capital profile. Plain account numbers are not stored; only masked details and a provider recipient reference are retained. A linked account can be selected for wallet withdrawals.
+- `GET/POST /support` lists and creates support tickets. Admin staff can update their status through the admin API; email delivery is not integrated.
 - `GET /about` returns the product information shown in More.
 
-Configure a long, unique `ACCOUNT_REVIEW_TOKEN` in the backend deployment environment to enable staff operations. The token must only be given to trusted server-side review tooling and must never be exposed in frontend code. With no token configured, review routes return `503`. The protected `/api/account-review/verifications` and `/support` routes list pending items; `PATCH /verifications/:requestId` accepts a `verified` or `rejected` decision, and `PATCH /support/:requestId` updates a ticket status. These APIs are not a staff UI and do not replace a secure evidence-review workflow. Configure and rotate the token outside source control.
+The legacy `/api/account-review` routes use `ACCOUNT_REVIEW_TOKEN` for trusted server-side tools. Never expose that token in browser code. The admin dashboard instead uses authenticated, role-protected routes under `/api/admin`.
+
+## Admin dashboard
+
+The admin app uses this backend's HttpOnly session cookie and requires an `admin` or `super_admin` role. Configure `ADMIN_EMAIL`, `ADMIN_NAME`, and `ADMIN_PASSWORD` only in the backend deployment environment. At startup, the backend creates the configured admin or synchronizes the matching account as a `super_admin`; changing `ADMIN_PASSWORD` also changes the account password on the next restart. Use a unique password of at least 12 characters and rotate any password shared in chat.
+
+Set `ADMIN_URL` to the exact admin site origin (scheme and hostname only, with no trailing slash) in the backend deployment. Credentialed CORS uses it to allow the admin browser app. The admin frontend deployment must separately set `VITE_API_URL` to this backend's public origin.
+
+The authenticated staff API is under `/api/admin`:
+
+- `GET /overview`, `/users`, and `/transactions` provide real platform data.
+- `GET /operations/wallets` provides read-only wallet totals and recent balances.
+- `GET /operations/verification-requests?status=pending` lists submitted requests. `PATCH /operations/verification-requests/:requestId` requires a decision, an evidence-review confirmation, and a reviewer note. Identity documents are not collected by this app; review evidence only through an approved secure process.
+- `GET /operations/support-requests?status=all` lists real support tickets. `PATCH /operations/support-requests/:requestId` changes status with a required staff note.
+- `GET /operations/audit-logs` lists recorded KYC and support actions. Mutations and audit entries are saved in one MongoDB transaction.
+
+Admin write routes require a valid admin session, admin role, and an approved request origin. Wallets remain read-only.

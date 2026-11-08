@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 
 const User = require('./models/User');
+const adminRoutes = require('./routes/adminRoutes');
 const requireAuth = require('./middleware/requireAuth');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const coreLockRoutes = require('./routes/coreLockRoutes');
@@ -22,10 +23,24 @@ const PORT = process.env.PORT || 5000;
 const getSessionToken = (req) => req.headers.cookie?.split(';').map((part) => part.trim())
   .find((part) => part.startsWith('gwic_session='))?.slice('gwic_session='.length);
 const allowedOrigins = [
+  'https://kalmacapital.com',
+  'https://www.kalmacapital.com',
+  'https://kalmacapital.com.ng',
+  'https://www.kalmacapital.com.ng',
   process.env.FRONTEND_URL,
+  process.env.ADMIN_URL,
   ...(process.env.CORS_ORIGINS || '').split(','),
   ...(process.env.NODE_ENV !== 'production'
-    ? ['http://localhost:5173', 'http://127.0.0.1:5173']
+    ? [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:8081',
+      'http://127.0.0.1:8081',
+      'http://localhost:8082',
+      'http://127.0.0.1:8082',
+      'http://localhost:8083',
+      'http://127.0.0.1:8083',
+    ]
     : []),
 ]
   .filter(Boolean)
@@ -46,10 +61,11 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/account-review', accountReviewRoutes);
 app.use('/api/portfolio', portfolioRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/', (req, res) => {
   res.json({
-    message: 'GWIC Backend API is running.',
+    message: 'Kalma Capital API is running.',
     health: '/api/health',
   });
 });
@@ -167,7 +183,13 @@ app.post('/api/auth/login', async (req, res, next) => {
 
     return res.json({
       message: 'You are now logged in.',
-      user: { id: user.id, name: user.name, email: user.email },
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role || 'user',
+        status: user.status || 'active',
+      },
     });
   } catch (error) {
     return next(error);
@@ -176,7 +198,13 @@ app.post('/api/auth/login', async (req, res, next) => {
 
 app.get('/api/auth/me', requireAuth, (req, res) => {
   return res.json({
-    user: { id: req.user.id, name: req.user.name, email: req.user.email },
+    user: {
+      id: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
+      role: req.user.role || 'user',
+      status: req.user.status || 'active',
+    },
   });
 });
 
@@ -227,6 +255,7 @@ async function startServer() {
 
   await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
   console.log('MongoDB connected.');
+  await ensureDefaultAdminUser();
   startCoreSavingsScheduler();
   return app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
@@ -238,6 +267,48 @@ if (require.main === module) {
     console.error('Backend startup failed:', error.name, error.message);
     process.exitCode = 1;
   });
+}
+
+async function ensureDefaultAdminUser() {
+  const adminEmail = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+  const adminPassword = process.env.ADMIN_PASSWORD || '';
+  const adminName = (process.env.ADMIN_NAME || 'Kalma Capital Administrator').trim();
+
+  if (!adminEmail && !adminPassword) {
+    console.log('Admin bootstrap skipped: admin credentials are not configured.');
+    return;
+  }
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)
+    || Buffer.byteLength(adminPassword, 'utf8') < 12
+    || Buffer.byteLength(adminPassword, 'utf8') > 72
+  ) {
+    throw new Error('Admin bootstrap requires a valid ADMIN_EMAIL and an ADMIN_PASSWORD between 12 and 72 bytes.');
+  }
+
+  const existingUser = await User.findOne({ email: adminEmail }).select('+passwordHash');
+  if (existingUser) {
+    existingUser.name = adminName || existingUser.name;
+    existingUser.role = 'super_admin';
+    existingUser.status = 'active';
+    existingUser.sessionVersion += 1;
+    existingUser.passwordHash = adminPassword;
+    await existingUser.save();
+    console.log('Configured admin account synchronized.');
+    return;
+  }
+
+  await User.create({
+    name: adminName || 'Kalma Capital Administrator',
+    email: adminEmail,
+    phone: '',
+    goal: 'Emergency savings',
+    product: 'undecided',
+    role: 'super_admin',
+    status: 'active',
+    passwordHash: adminPassword,
+  });
+  console.log('Configured admin account created.');
 }
 
 module.exports = { app, startServer };
