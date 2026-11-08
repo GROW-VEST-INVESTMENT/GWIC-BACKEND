@@ -27,6 +27,7 @@ const allowedOrigins = [
   'https://www.kalmacapital.com',
   'https://kalmacapital.com.ng',
   'https://www.kalmacapital.com.ng',
+  'https://gwic-audit.vercel.app',
   process.env.FRONTEND_URL,
   process.env.ADMIN_URL,
   ...(process.env.CORS_ORIGINS || '').split(','),

@@ -33,6 +33,18 @@ test('credentialed CORS accepts the configured admin origin', async () => {
   assert.equal(response.headers.get('access-control-allow-credentials'), 'true');
 });
 
+test('credentialed CORS accepts the public Vercel admin origin', async () => {
+  await listening;
+  const publicAdminOrigin = 'https://gwic-audit.vercel.app';
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/`, {
+    headers: { Origin: publicAdminOrigin },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('access-control-allow-origin'), publicAdminOrigin);
+  assert.equal(response.headers.get('access-control-allow-credentials'), 'true');
+});
+
 test('credentialed CORS rejects unconfigured admin origins', async () => {
   await listening;
   const response = await fetch(`http://127.0.0.1:${server.address().port}/`, {

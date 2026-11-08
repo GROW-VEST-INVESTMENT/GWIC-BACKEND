@@ -64,6 +64,10 @@ test('admin write origin requires an approved origin', () => {
     requireAdminOrigin({ get: () => 'https://admin.example.com' }, makeResponse(), () => { passed = true; });
     assert.equal(passed, true);
 
+    passed = false;
+    requireAdminOrigin({ get: () => 'https://gwic-audit.vercel.app' }, makeResponse(), () => { passed = true; });
+    assert.equal(passed, true);
+
     const response = makeResponse();
     requireAdminOrigin({ get: () => 'https://untrusted.example.com' }, response, () => {});
     assert.equal(response.statusCode, 403);

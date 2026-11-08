@@ -55,7 +55,7 @@ The legacy `/api/account-review` routes use `ACCOUNT_REVIEW_TOKEN` for trusted s
 
 The admin app uses this backend's HttpOnly session cookie and requires an `admin` or `super_admin` role. Configure `ADMIN_EMAIL`, `ADMIN_NAME`, and `ADMIN_PASSWORD` only in the backend deployment environment. At startup, the backend creates the configured admin or synchronizes the matching account as a `super_admin`; changing `ADMIN_PASSWORD` also changes the account password on the next restart. Use a unique password of at least 12 characters and rotate any password shared in chat.
 
-Set `ADMIN_URL` to the exact admin site origin (scheme and hostname only, with no trailing slash) in the backend deployment. Credentialed CORS uses it to allow the admin browser app. The admin frontend deployment must separately set `VITE_API_URL` to this backend's public origin.
+Set `ADMIN_URL` to the exact admin site origin (scheme and hostname only, with no trailing slash) in the backend deployment. The production admin origin `https://gwic-audit.vercel.app` is also allowed for CORS and admin write requests. The admin frontend deployment must separately set `VITE_API_URL` to this backend's public origin.
 
 The authenticated staff API is under `/api/admin`:
 
