@@ -59,7 +59,7 @@ Set `ADMIN_URL` to the exact admin site origin (scheme and hostname only, with n
 
 The authenticated staff API is under `/api/admin`:
 
-- `GET /overview`, `/users`, and `/transactions` provide real platform data.
+- `GET /overview`, `/users`, `/users/:userId`, and `/transactions` provide real platform data. The user-detail endpoint is read-only and returns profile fields, wallet balance, recent transactions, verification status history, support ticket summaries, investment plans, and savings goals. It excludes credentials, session data, bank details, verification birth dates, and private staff notes.
 - `GET /operations/wallets` provides read-only wallet totals and recent balances.
 - `GET /operations/verification-requests?status=pending` lists submitted requests. `PATCH /operations/verification-requests/:requestId` requires a decision, an evidence-review confirmation, and a reviewer note. Identity documents are not collected by this app; review evidence only through an approved secure process.
 - `GET /operations/support-requests?status=all` lists real support tickets. `PATCH /operations/support-requests/:requestId` changes status with a required staff note.

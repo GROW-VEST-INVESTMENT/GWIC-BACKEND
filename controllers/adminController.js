@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const AdminAuditLog = require('../models/AdminAuditLog');
+const InvestmentPlan = require('../models/InvestmentPlan');
+const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
@@ -82,6 +84,106 @@ async function listUsers(_req, res, next) {
         status: user.status || 'active',
         kycVerified: user.isKycVerified === true,
         product: user.product,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getUserDetail(req, res, next) {
+  if (!isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ message: 'Invalid user ID.' });
+  }
+
+  try {
+    const user = await User.findById(req.params.userId)
+      .select('name email phone role status isKycVerified product goal createdAt')
+      .lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const [wallet, transactions, verificationRequests, supportRequests, investmentPlans, savingsGoals] = await Promise.all([
+      Wallet.findOne({ userId: user._id }).select('balanceKobo updatedAt').lean(),
+      WalletTransaction.find({ userId: user._id })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .select('reference type amountKobo status createdAt')
+        .lean(),
+      VerificationRequest.find({ userId: user._id })
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .select('status createdAt reviewedAt')
+        .lean(),
+      SupportRequest.find({ userId: user._id })
+        .sort({ updatedAt: -1 })
+        .limit(10)
+        .select('reference category subject status createdAt updatedAt resolvedAt')
+        .lean(),
+      InvestmentPlan.find({ userId: user._id })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .select('productType principalKobo accruedYieldKobo status startDate maturityDate createdAt')
+        .lean(),
+      SavingsGoal.find({ userId: user._id })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .select('name targetAmount targetDate savedAmount createdAt')
+        .lean(),
+    ]);
+
+    return res.json({
+      user: {
+        id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        phone: user.phone || '',
+        role: user.role || 'user',
+        status: user.status || 'active',
+        kycVerified: user.isKycVerified === true,
+        product: user.product,
+        goal: user.goal,
+        createdAt: user.createdAt,
+      },
+      wallet: wallet ? {
+        balance: wallet.balanceKobo / 100,
+        updatedAt: wallet.updatedAt,
+      } : null,
+      transactions: transactions.map((transaction) => ({
+        reference: transaction.reference,
+        type: transaction.type,
+        amount: transaction.amountKobo / 100,
+        status: transaction.status,
+        createdAt: transaction.createdAt,
+      })),
+      verificationRequests: verificationRequests.map((request) => ({
+        status: request.status,
+        createdAt: request.createdAt,
+        reviewedAt: request.reviewedAt,
+      })),
+      supportRequests: supportRequests.map((request) => ({
+        reference: request.reference,
+        category: request.category,
+        subject: request.subject,
+        status: request.status,
+        createdAt: request.createdAt,
+        updatedAt: request.updatedAt,
+        resolvedAt: request.resolvedAt,
+      })),
+      investmentPlans: investmentPlans.map((plan) => ({
+        productType: plan.productType,
+        principal: plan.principalKobo / 100,
+        accruedYield: plan.accruedYieldKobo / 100,
+        status: plan.status,
+        startDate: plan.startDate,
+        maturityDate: plan.maturityDate,
+      })),
+      savingsGoals: savingsGoals.map((goal) => ({
+        name: goal.name,
+        targetAmount: goal.targetAmount,
+        targetDate: goal.targetDate,
+        savedAmount: goal.savedAmount,
       })),
     });
   } catch (error) {
@@ -365,6 +467,7 @@ async function listAuditLogs(_req, res, next) {
 
 module.exports = {
   getOverview,
+  getUserDetail,
   getWalletSummary,
   listAuditLogs,
   listSupportRequests,

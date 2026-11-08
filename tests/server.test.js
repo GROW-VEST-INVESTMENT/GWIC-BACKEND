@@ -62,3 +62,12 @@ test('admin operations require a signed-in session', async () => {
 
   assert.equal(response.status, 401);
 });
+
+test('user detail endpoint requires a signed-in admin session', async () => {
+  await listening;
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/admin/users/507f1f77bcf86cd799439011`, {
+    headers: { Origin: adminOrigin },
+  });
+
+  assert.equal(response.status, 401);
+});

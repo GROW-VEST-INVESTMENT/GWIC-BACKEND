@@ -4,6 +4,7 @@ const requireAdmin = require('../middleware/requireAdmin');
 const requireAdminOrigin = require('../middleware/requireAdminOrigin');
 const {
   getOverview,
+  getUserDetail,
   getWalletSummary,
   listAuditLogs,
   listSupportRequests,
@@ -19,6 +20,7 @@ const router = express.Router();
 router.use(requireAuth, requireAdmin);
 router.get('/overview', getOverview);
 router.get('/users', listUsers);
+router.get('/users/:userId', getUserDetail);
 router.get('/transactions', listTransactions);
 router.get('/operations/wallets', getWalletSummary);
 router.get('/operations/verification-requests', listVerificationRequests);
