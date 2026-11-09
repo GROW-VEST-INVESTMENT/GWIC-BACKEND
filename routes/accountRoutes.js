@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const requireAuth = require('../middleware/requireAuth');
+const requireTransactionAccess = require('../middleware/requireTransactionAccess');
 const {
   getProfile,
   updateProfile,
@@ -55,9 +56,9 @@ router.patch('/notifications', updateNotificationPreferences);
 router.get('/verification', getVerificationStatus);
 router.post('/verification', createVerificationRequest);
 router.get('/banks', getLinkedBanks);
-router.post('/banks', createLinkedBank);
-router.patch('/banks/:bankId/default', setDefaultBank);
-router.delete('/banks/:bankId', deleteLinkedBank);
+router.post('/banks', requireTransactionAccess, createLinkedBank);
+router.patch('/banks/:bankId/default', requireTransactionAccess, setDefaultBank);
+router.delete('/banks/:bankId', requireTransactionAccess, deleteLinkedBank);
 router.get('/support', listSupportRequests);
 router.post('/support', createSupportRequest);
 

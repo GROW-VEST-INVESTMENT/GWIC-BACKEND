@@ -73,7 +73,7 @@ async function listUsers(_req, res, next) {
   try {
     const users = await User.find({})
       .sort({ createdAt: -1 })
-      .select('name email role status isKycVerified product')
+      .select('name email role status transactionRestricted isKycVerified product')
       .lean();
     return res.json({
       users: users.map((user) => ({
@@ -82,6 +82,7 @@ async function listUsers(_req, res, next) {
         email: user.email,
         role: user.role || 'user',
         status: user.status || 'active',
+        transactionRestricted: user.transactionRestricted === true,
         kycVerified: user.isKycVerified === true,
         product: user.product,
       })),
@@ -98,7 +99,7 @@ async function getUserDetail(req, res, next) {
 
   try {
     const user = await User.findById(req.params.userId)
-      .select('name email phone role status isKycVerified product goal createdAt')
+      .select('name email phone role status transactionRestricted transactionRestrictedAt +transactionRestrictionReason isKycVerified product goal createdAt')
       .lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
@@ -141,6 +142,9 @@ async function getUserDetail(req, res, next) {
         phone: user.phone || '',
         role: user.role || 'user',
         status: user.status || 'active',
+        transactionRestricted: user.transactionRestricted === true,
+        transactionRestrictionReason: user.transactionRestricted ? user.transactionRestrictionReason || '' : '',
+        transactionRestrictedAt: user.transactionRestricted ? user.transactionRestrictedAt || null : null,
         kycVerified: user.isKycVerified === true,
         product: user.product,
         goal: user.goal,
@@ -188,6 +192,72 @@ async function getUserDetail(req, res, next) {
     });
   } catch (error) {
     return next(error);
+  }
+}
+
+async function updateTransactionRestriction(req, res, next) {
+  const { restricted, reason } = req.body || {};
+  const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+  if (typeof restricted !== 'boolean' || normalizedReason.length < 3 || normalizedReason.length > 500) {
+    return res.status(400).json({
+      message: 'Choose whether transaction access is restricted and provide a reason between 3 and 500 characters.',
+    });
+  }
+  if (!isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ message: 'Invalid user ID.' });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let updatedUser;
+    await session.withTransaction(async () => {
+      const user = await User.findById(req.params.userId).session(session);
+      if (!user) {
+        const error = new Error('User not found.');
+        error.status = 404;
+        throw error;
+      }
+      if (['admin', 'super_admin'].includes(user.role)) {
+        const error = new Error('Transaction restrictions can only be applied to customer accounts.');
+        error.status = 403;
+        throw error;
+      }
+
+      const previousStatus = user.transactionRestricted ? 'restricted' : 'allowed';
+      const nextStatus = restricted ? 'restricted' : 'allowed';
+      if (previousStatus !== nextStatus) {
+        user.transactionRestricted = restricted;
+        user.transactionRestrictionReason = restricted ? normalizedReason : '';
+        user.transactionRestrictedAt = restricted ? new Date() : null;
+        await user.save({ session });
+        await new AdminAuditLog({
+          actorId: req.user.id,
+          action: 'account.transaction_access_updated',
+          targetType: 'user',
+          targetId: user._id,
+          previousStatus,
+          nextStatus,
+          note: normalizedReason,
+        }).save({ session });
+      }
+
+      updatedUser = {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        transactionRestricted: user.transactionRestricted === true,
+        transactionRestrictionReason: user.transactionRestricted ? user.transactionRestrictionReason : '',
+        transactionRestrictedAt: user.transactionRestricted ? user.transactionRestrictedAt : null,
+      };
+    });
+    return res.json({
+      message: restricted ? 'Transaction access restricted.' : 'Transaction access restored.',
+      user: updatedUser,
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    await session.endSession();
   }
 }
 
@@ -475,5 +545,6 @@ module.exports = {
   listUsers,
   listVerificationRequests,
   reviewVerification,
+  updateTransactionRestriction,
   updateSupportRequest,
 };

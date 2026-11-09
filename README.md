@@ -60,9 +60,10 @@ Set `ADMIN_URL` to the exact admin site origin (scheme and hostname only, with n
 The authenticated staff API is under `/api/admin`:
 
 - `GET /overview`, `/users`, `/users/:userId`, and `/transactions` provide real platform data. The user-detail endpoint is read-only and returns profile fields, wallet balance, recent transactions, verification status history, support ticket summaries, investment plans, and savings goals. It excludes credentials, session data, bank details, verification birth dates, and private staff notes.
+- `PATCH /users/:userId/transaction-restriction` requires a boolean `restricted` value and a 3–500 character reason. It temporarily blocks new deposits, withdrawal initiation/account resolution, linked-bank changes, new Core savings plans, and plan liquidation while preserving account viewing, support, existing balances/plans, deposit verification, and Paystack webhooks. Customer accounts are never locked out; only non-staff accounts can be restricted. Each state change and reason is saved with the user update in one MongoDB transaction. Requests already in progress at the time of restriction may complete; review pending withdrawals separately.
 - `GET /operations/wallets` provides read-only wallet totals and recent balances.
 - `GET /operations/verification-requests?status=pending` lists submitted requests. `PATCH /operations/verification-requests/:requestId` requires a decision, an evidence-review confirmation, and a reviewer note. Identity documents are not collected by this app; review evidence only through an approved secure process.
 - `GET /operations/support-requests?status=all` lists real support tickets. `PATCH /operations/support-requests/:requestId` changes status with a required staff note.
-- `GET /operations/audit-logs` lists recorded KYC and support actions. Mutations and audit entries are saved in one MongoDB transaction.
+- `GET /operations/audit-logs` lists recorded KYC, support, and transaction-access actions. Mutations and audit entries are saved in one MongoDB transaction.
 
 Admin write routes require a valid admin session, admin role, and an approved request origin. Wallets remain read-only.

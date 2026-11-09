@@ -13,6 +13,7 @@ const {
   listVerificationRequests,
   reviewVerification,
   updateSupportRequest,
+  updateTransactionRestriction,
 } = require('../controllers/adminController');
 
 const router = express.Router();
@@ -21,6 +22,7 @@ router.use(requireAuth, requireAdmin);
 router.get('/overview', getOverview);
 router.get('/users', listUsers);
 router.get('/users/:userId', getUserDetail);
+router.patch('/users/:userId/transaction-restriction', requireAdminOrigin, updateTransactionRestriction);
 router.get('/transactions', listTransactions);
 router.get('/operations/wallets', getWalletSummary);
 router.get('/operations/verification-requests', listVerificationRequests);

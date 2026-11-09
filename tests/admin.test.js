@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const mongoose = require('mongoose');
 const requireAdmin = require('../middleware/requireAdmin');
 const requireAdminOrigin = require('../middleware/requireAdminOrigin');
+const AdminAuditLog = require('../models/AdminAuditLog');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
@@ -13,6 +14,7 @@ const WalletTransaction = require('../models/WalletTransaction');
 const {
   getUserDetail,
   reviewVerification,
+  updateTransactionRestriction,
   updateSupportRequest,
 } = require('../controllers/adminController');
 
@@ -60,6 +62,7 @@ test('users default to regular-user role and active status', () => {
 
   assert.equal(user.role, 'user');
   assert.equal(user.status, 'active');
+  assert.equal(user.transactionRestricted, false);
 });
 
 test('admin middleware allows staff roles and rejects user accounts', () => {
@@ -99,6 +102,9 @@ test('user detail returns read-only account, wallet, and activity data without p
       phone: '+2348000000000',
       role: 'user',
       status: 'active',
+      transactionRestricted: false,
+      transactionRestrictionReason: '',
+      transactionRestrictedAt: null,
       isKycVerified: false,
       product: 'core-lock',
       goal: 'Emergency savings',
@@ -154,6 +160,9 @@ test('user detail returns read-only account, wallet, and activity data without p
       phone: '+2348000000000',
       role: 'user',
       status: 'active',
+      transactionRestricted: false,
+      transactionRestrictionReason: '',
+      transactionRestrictedAt: null,
       kycVerified: false,
       product: 'core-lock',
       goal: 'Emergency savings',
@@ -193,6 +202,100 @@ test('user detail returns read-only account, wallet, and activity data without p
     SupportRequest.find = originals.supportFind;
     InvestmentPlan.find = originals.investmentFind;
     SavingsGoal.find = originals.savingsGoalFind;
+  }
+});
+
+test('transaction restriction requires a boolean decision, valid user ID and meaningful reason', async () => {
+  for (const body of [
+    { restricted: true, reason: 'No' },
+    { restricted: 'true', reason: 'Risk review' },
+  ]) {
+    const response = makeResponse();
+    await updateTransactionRestriction(
+      { body, params: { userId: '507f1f77bcf86cd799439011' } },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 400);
+  }
+
+  const invalidIdResponse = makeResponse();
+  await updateTransactionRestriction(
+    { body: { restricted: true, reason: 'Risk review' }, params: { userId: 'not-an-id' } },
+    invalidIdResponse,
+    (error) => { throw error; },
+  );
+  assert.equal(invalidIdResponse.statusCode, 400);
+});
+
+test('restricting and restoring transaction access are audited with required reasons', async () => {
+  const originalStartSession = mongoose.startSession;
+  const originalFindById = User.findById;
+  const originalAuditSave = AdminAuditLog.prototype.save;
+  const userId = new mongoose.Types.ObjectId('507f1f77bcf86cd799439011');
+  const user = {
+    _id: userId,
+    id: userId.toString(),
+    name: 'Ada Example',
+    email: 'ada@example.com',
+    role: 'user',
+    transactionRestricted: false,
+    transactionRestrictionReason: '',
+    transactionRestrictedAt: null,
+    async save() {},
+  };
+  const audits = [];
+  const session = {
+    async withTransaction(callback) { await callback(); },
+    async endSession() {},
+  };
+  mongoose.startSession = async () => session;
+  User.findById = (id) => {
+    assert.equal(id, userId.toString());
+    return { session: async () => user };
+  };
+  AdminAuditLog.prototype.save = async function saveAudit() {
+    audits.push(this.toObject());
+    return this;
+  };
+
+  try {
+    const restrictionResponse = makeResponse();
+    await updateTransactionRestriction(
+      {
+        body: { restricted: true, reason: 'Suspicious withdrawal activity' },
+        params: { userId: userId.toString() },
+        user: { id: new mongoose.Types.ObjectId().toString() },
+      },
+      restrictionResponse,
+      (error) => { throw error; },
+    );
+    assert.equal(restrictionResponse.body.user.transactionRestricted, true);
+    assert.equal(restrictionResponse.body.user.transactionRestrictionReason, 'Suspicious withdrawal activity');
+
+    const restoreResponse = makeResponse();
+    await updateTransactionRestriction(
+      {
+        body: { restricted: false, reason: 'Review completed; access restored' },
+        params: { userId: userId.toString() },
+        user: { id: new mongoose.Types.ObjectId().toString() },
+      },
+      restoreResponse,
+      (error) => { throw error; },
+    );
+    assert.equal(restoreResponse.body.user.transactionRestricted, false);
+    assert.equal(restoreResponse.body.user.transactionRestrictionReason, '');
+    assert.deepEqual(
+      audits.map(({ previousStatus, nextStatus, note }) => ({ previousStatus, nextStatus, note })),
+      [
+        { previousStatus: 'allowed', nextStatus: 'restricted', note: 'Suspicious withdrawal activity' },
+        { previousStatus: 'restricted', nextStatus: 'allowed', note: 'Review completed; access restored' },
+      ],
+    );
+  } finally {
+    mongoose.startSession = originalStartSession;
+    User.findById = originalFindById;
+    AdminAuditLog.prototype.save = originalAuditSave;
   }
 });
 
