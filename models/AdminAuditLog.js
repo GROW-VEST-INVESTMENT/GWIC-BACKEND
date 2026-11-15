@@ -3,7 +3,16 @@ const mongoose = require('mongoose');
 const adminAuditLogSchema = new mongoose.Schema(
   {
     actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    action: { type: String, enum: ['kyc.reviewed', 'support.status_updated', 'account.transaction_access_updated'], required: true },
+    action: {
+      type: String,
+      enum: [
+        'kyc.reviewed',
+        'support.status_updated',
+        'account.transaction_access_updated',
+        'account.status_updated',
+      ],
+      required: true,
+    },
     targetType: { type: String, enum: ['verification_request', 'support_request', 'user'], required: true },
     targetId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     previousStatus: { type: String, required: true },

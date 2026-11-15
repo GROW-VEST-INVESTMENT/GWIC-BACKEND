@@ -99,7 +99,7 @@ async function getUserDetail(req, res, next) {
 
   try {
     const user = await User.findById(req.params.userId)
-      .select('name email phone role status transactionRestricted transactionRestrictedAt +transactionRestrictionReason isKycVerified product goal createdAt')
+      .select('name email phone role status statusBeforeSuspension suspensionReason suspendedAt transactionRestricted transactionRestrictedAt +transactionRestrictionReason isKycVerified product goal createdAt')
       .lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
@@ -142,6 +142,8 @@ async function getUserDetail(req, res, next) {
         phone: user.phone || '',
         role: user.role || 'user',
         status: user.status || 'active',
+        suspensionReason: user.suspensionReason || '',
+        suspendedAt: user.suspendedAt || null,
         transactionRestricted: user.transactionRestricted === true,
         transactionRestrictionReason: user.transactionRestricted ? user.transactionRestrictionReason || '' : '',
         transactionRestrictedAt: user.transactionRestricted ? user.transactionRestrictedAt || null : null,
@@ -192,6 +194,80 @@ async function getUserDetail(req, res, next) {
     });
   } catch (error) {
     return next(error);
+  }
+}
+
+async function updateAccountStatus(req, res, next) {
+  const { status, reason } = req.body || {};
+  const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+  if (!['active', 'suspended'].includes(status) || normalizedReason.length < 3 || normalizedReason.length > 500) {
+    return res.status(400).json({
+      message: 'Choose active or suspended and provide a reason between 3 and 500 characters.',
+    });
+  }
+  if (!isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ message: 'Invalid user ID.' });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let updatedUser;
+    await session.withTransaction(async () => {
+      const user = await User.findById(req.params.userId).session(session);
+      if (!user || user.role !== 'user') {
+        const error = new Error('Regular user account not found.');
+        error.status = 404;
+        throw error;
+      }
+      if (status === 'active' && user.status !== 'suspended') {
+        const error = new Error('Only a frozen account can be restored.');
+        error.status = 409;
+        throw error;
+      }
+      if (status === 'suspended' && user.status === 'suspended') {
+        const error = new Error('Account is already frozen.');
+        error.status = 409;
+        throw error;
+      }
+
+      const previousStatus = user.status || 'active';
+      const nextStatus = status === 'suspended'
+        ? 'suspended'
+        : (user.statusBeforeSuspension || 'active');
+      user.statusBeforeSuspension = status === 'suspended' ? previousStatus : null;
+      user.status = nextStatus;
+      user.sessionVersion += 1;
+      user.suspensionReason = status === 'suspended' ? normalizedReason : '';
+      user.suspendedAt = status === 'suspended' ? new Date() : null;
+      user.suspendedBy = status === 'suspended' ? req.user._id : null;
+      await user.save({ session });
+      await new AdminAuditLog({
+        actorId: req.user._id,
+        action: 'account.status_updated',
+        targetType: 'user',
+        targetId: user._id,
+        previousStatus,
+        nextStatus,
+        note: normalizedReason,
+      }).save({ session });
+      updatedUser = {
+        id: user.id,
+        status: user.status,
+        suspensionReason: user.suspensionReason,
+        suspendedAt: user.suspendedAt,
+      };
+    });
+
+    return res.json({
+      message: updatedUser.status === 'suspended'
+        ? 'Account frozen. The customer can no longer sign in.'
+        : 'Account status restored.',
+      user: updatedUser,
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    await session.endSession();
   }
 }
 
@@ -545,6 +621,7 @@ module.exports = {
   listUsers,
   listVerificationRequests,
   reviewVerification,
+  updateAccountStatus,
   updateTransactionRestriction,
   updateSupportRequest,
 };

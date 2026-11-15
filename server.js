@@ -168,6 +168,9 @@ app.post('/api/auth/login', async (req, res, next) => {
     if (!user || !passwordMatches) {
       return res.status(401).json({ message: 'Email or password is incorrect.' });
     }
+    if (user.status === 'suspended') {
+      return res.status(403).json({ message: 'This account has been suspended. Please contact support.' });
+    }
 
     const token = jwt.sign(
       { sub: user.id, ver: user.sessionVersion },

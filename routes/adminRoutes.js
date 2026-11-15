@@ -13,6 +13,7 @@ const {
   listVerificationRequests,
   reviewVerification,
   updateSupportRequest,
+  updateAccountStatus,
   updateTransactionRestriction,
 } = require('../controllers/adminController');
 
@@ -22,6 +23,7 @@ router.use(requireAuth, requireAdmin);
 router.get('/overview', getOverview);
 router.get('/users', listUsers);
 router.get('/users/:userId', getUserDetail);
+router.patch('/users/:userId/account-status', requireAdminOrigin, updateAccountStatus);
 router.patch('/users/:userId/transaction-restriction', requireAdminOrigin, updateTransactionRestriction);
 router.get('/transactions', listTransactions);
 router.get('/operations/wallets', getWalletSummary);
