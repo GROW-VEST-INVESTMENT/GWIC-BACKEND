@@ -37,7 +37,7 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, trim: true, maxlength: 32, default: '' },
     goal: { type: String, required: true, enum: GOALS },
     product: { type: String, required: true, enum: PRODUCTS },
-    role: { type: String, enum: ['user', 'admin', 'super_admin'], default: 'user', index: true },
+    role: { type: String, enum: ['user', 'staff', 'admin', 'super_admin'], default: 'user', index: true },
     status: { type: String, enum: ['active', 'pending', 'suspended'], default: 'active', index: true },
     statusBeforeSuspension: { type: String, enum: ['active', 'pending', null], default: null },
     suspensionReason: { type: String, default: '', maxlength: 500 },
