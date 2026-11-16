@@ -7,6 +7,7 @@ const AdminAuditLog = require('../models/AdminAuditLog');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
+const TransactionTierPolicy = require('../models/TransactionTierPolicy');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
 const Wallet = require('../models/Wallet');
@@ -14,9 +15,12 @@ const WalletTransaction = require('../models/WalletTransaction');
 const {
   getUserDetail,
   reviewVerification,
+  updateTransactionTierPolicy,
+  updateUserTransactionTier,
   updateTransactionRestriction,
   updateSupportRequest,
 } = require('../controllers/adminController');
+const { listDepositReviews, reviewDeposit } = require('../controllers/walletController');
 
 function makeResponse() {
   return {
@@ -87,6 +91,8 @@ test('user detail returns read-only account, wallet, and activity data without p
     findById: User.findById,
     walletFindOne: Wallet.findOne,
     transactionsFind: WalletTransaction.find,
+    transactionsAggregate: WalletTransaction.aggregate,
+    tierPolicyFindOne: TransactionTierPolicy.findOne,
     verificationFind: VerificationRequest.find,
     supportFind: SupportRequest.find,
     investmentFind: InvestmentPlan.find,
@@ -125,6 +131,8 @@ test('user detail returns read-only account, wallet, and activity data without p
       selectors.transaction = fields;
     });
   };
+  WalletTransaction.aggregate = async () => [];
+  TransactionTierPolicy.findOne = () => ({ lean: async () => null });
   VerificationRequest.find = (filter) => {
     assert.equal(filter.userId, userId);
     return makeQuery([{ status: 'pending', createdAt: now, legalName: 'Private Legal Name', dateOfBirth: now }], (fields) => {
@@ -162,6 +170,33 @@ test('user detail returns read-only account, wallet, and activity data without p
       phone: '+2348000000000',
       role: 'user',
       status: 'active',
+      transactionTier: {
+        level: 0,
+        name: 'Unverified',
+        verificationStatus: 'unverified',
+        deposit: {
+          perTransaction: 10000,
+          perDay: 20000,
+          perMonth: 50000,
+          dailyUsed: 0,
+          dailyRemaining: 20000,
+          monthlyUsed: 0,
+          monthlyRemaining: 50000,
+        },
+        withdrawal: {
+          perTransaction: 0,
+          perDay: 0,
+          perMonth: 0,
+          dailyUsed: 0,
+          dailyRemaining: 0,
+          monthlyUsed: 0,
+          monthlyRemaining: 0,
+        },
+        nextTier: { level: 1, name: 'Basic verified' },
+      },
+      transactionTierUpdatedAt: null,
+      transactionTierUpdatedBy: null,
+      transactionTierUpdateReason: '',
       suspensionReason: '',
       suspendedAt: null,
       transactionRestricted: false,
@@ -202,6 +237,8 @@ test('user detail returns read-only account, wallet, and activity data without p
     User.findById = originals.findById;
     Wallet.findOne = originals.walletFindOne;
     WalletTransaction.find = originals.transactionsFind;
+    WalletTransaction.aggregate = originals.transactionsAggregate;
+    TransactionTierPolicy.findOne = originals.tierPolicyFindOne;
     VerificationRequest.find = originals.verificationFind;
     SupportRequest.find = originals.supportFind;
     InvestmentPlan.find = originals.investmentFind;
@@ -383,4 +420,85 @@ test('support status changes require a valid status and staff note', async () =>
     );
     assert.equal(response.statusCode, 400);
   }
+});
+
+test('only super admins can change shared transaction tier limits', async () => {
+  const response = makeResponse();
+  await updateTransactionTierPolicy(
+    { user: { role: 'admin' }, body: { tiers: [], reason: 'Policy reviewed' } },
+    response,
+    (error) => { throw error; },
+  );
+  assert.equal(response.statusCode, 403);
+});
+
+test('transaction tier policy changes reject invalid schedules before database access', async () => {
+  const response = makeResponse();
+  await updateTransactionTierPolicy(
+    { user: { role: 'super_admin' }, body: { tiers: [], reason: 'Policy reviewed' } },
+    response,
+    (error) => { throw error; },
+  );
+  assert.equal(response.statusCode, 400);
+});
+
+test('customer tier assignment validates tier, reason, and customer ID', async () => {
+  const invalidTierResponse = makeResponse();
+  await updateUserTransactionTier(
+    { user: { _id: new mongoose.Types.ObjectId() }, params: { userId: '507f1f77bcf86cd799439011' }, body: { tier: 4, reason: 'Tier review' } },
+    invalidTierResponse,
+    (error) => { throw error; },
+  );
+  assert.equal(invalidTierResponse.statusCode, 400);
+
+  const invalidIdResponse = makeResponse();
+  await updateUserTransactionTier(
+    { user: { _id: new mongoose.Types.ObjectId() }, params: { userId: 'invalid' }, body: { tier: 1, reason: 'Tier review' } },
+    invalidIdResponse,
+    (error) => { throw error; },
+  );
+  assert.equal(invalidIdResponse.statusCode, 400);
+});
+
+test('held-deposit review requires a valid decision and reason before provider access', async () => {
+  const response = makeResponse();
+  await reviewDeposit(
+    { body: { decision: 'release', reason: 'No' }, params: { reference: 'GWIC_DEP_test' } },
+    response,
+    (error) => { throw error; },
+  );
+  assert.equal(response.statusCode, 400);
+});
+
+test('held-deposit queue returns provider refund states for safe admin display', async (t) => {
+  const originalFind = WalletTransaction.find;
+  const createdAt = new Date('2026-11-15T12:00:00.000Z');
+  WalletTransaction.find = (filter) => {
+    assert.deepEqual(filter, { type: 'deposit', status: 'requires_approval' });
+    const query = {
+      sort() { return this; },
+      limit() { return this; },
+      populate() { return this; },
+      lean: async () => [{
+        reference: 'GWIC_DEP_test',
+        userId: { _id: new mongoose.Types.ObjectId(), name: 'Ada Example', email: 'ada@example.com' },
+        amountKobo: 25000000,
+        reviewReason: 'Deposit exceeds Tier 0 limits.',
+        tierAtInitiation: 0,
+        refundStatus: 'unknown',
+        reviewDecision: 'refund_requested',
+        reviewedAt: createdAt,
+        createdAt,
+      }],
+    };
+    return query;
+  };
+  t.after(() => { WalletTransaction.find = originalFind; });
+
+  const response = makeResponse();
+  await listDepositReviews({}, response, (error) => { throw error; });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.transactions[0].refundStatus, 'unknown');
+  assert.equal(response.body.transactions[0].reviewDecision, 'refund_requested');
+  assert.equal(response.body.transactions[0].amount, 250000);
 });

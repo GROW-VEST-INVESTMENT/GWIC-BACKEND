@@ -3,10 +3,18 @@ const AdminAuditLog = require('../models/AdminAuditLog');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
+const TransactionTierPolicy = require('../models/TransactionTierPolicy');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
 const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
+const {
+  DEFAULT_TIERS,
+  getTierLevel,
+  getTierPolicy,
+  getTierSummary,
+  validateTierPolicy,
+} = require('../services/transactionTiers');
 
 const VERIFICATION_STATUSES = ['pending', 'verified', 'rejected'];
 const SUPPORT_STATUSES = ['open', 'in_progress', 'resolved'];
@@ -73,8 +81,9 @@ async function listUsers(_req, res, next) {
   try {
     const users = await User.find({})
       .sort({ createdAt: -1 })
-      .select('name email role status transactionRestricted isKycVerified product')
+      .select('name email role status transactionRestricted isKycVerified transactionTier product')
       .lean();
+    const tiers = await getTierPolicy();
     return res.json({
       users: users.map((user) => ({
         id: user._id.toString(),
@@ -84,6 +93,8 @@ async function listUsers(_req, res, next) {
         status: user.status || 'active',
         transactionRestricted: user.transactionRestricted === true,
         kycVerified: user.isKycVerified === true,
+        transactionTier: getTierLevel(user),
+        transactionTierName: tiers[getTierLevel(user)]?.name || DEFAULT_TIERS[0].name,
         product: user.product,
       })),
     });
@@ -99,13 +110,13 @@ async function getUserDetail(req, res, next) {
 
   try {
     const user = await User.findById(req.params.userId)
-      .select('name email phone role status statusBeforeSuspension suspensionReason suspendedAt transactionRestricted transactionRestrictedAt +transactionRestrictionReason isKycVerified product goal createdAt')
+      .select('name email phone role status statusBeforeSuspension suspensionReason suspendedAt transactionRestricted transactionRestrictedAt +transactionRestrictionReason isKycVerified transactionTier transactionTierUpdatedAt transactionTierUpdatedBy transactionTierUpdateReason product goal createdAt')
       .lean();
     if (!user) {
       return res.status(404).json({ message: 'User not found.' });
     }
 
-    const [wallet, transactions, verificationRequests, supportRequests, investmentPlans, savingsGoals] = await Promise.all([
+    const [wallet, transactions, verificationRequests, supportRequests, investmentPlans, savingsGoals, tierSummary] = await Promise.all([
       Wallet.findOne({ userId: user._id }).select('balanceKobo updatedAt').lean(),
       WalletTransaction.find({ userId: user._id })
         .sort({ createdAt: -1 })
@@ -132,6 +143,7 @@ async function getUserDetail(req, res, next) {
         .limit(10)
         .select('name targetAmount targetDate savedAmount createdAt')
         .lean(),
+      getTierSummary(user),
     ]);
 
     return res.json({
@@ -148,6 +160,10 @@ async function getUserDetail(req, res, next) {
         transactionRestrictionReason: user.transactionRestricted ? user.transactionRestrictionReason || '' : '',
         transactionRestrictedAt: user.transactionRestricted ? user.transactionRestrictedAt || null : null,
         kycVerified: user.isKycVerified === true,
+        transactionTier: tierSummary,
+        transactionTierUpdatedAt: user.transactionTierUpdatedAt || null,
+        transactionTierUpdatedBy: user.transactionTierUpdatedBy?.toString() || null,
+        transactionTierUpdateReason: user.transactionTierUpdateReason || '',
         product: user.product,
         goal: user.goal,
         createdAt: user.createdAt,
@@ -194,6 +210,135 @@ async function getUserDetail(req, res, next) {
     });
   } catch (error) {
     return next(error);
+  }
+}
+
+async function getTransactionTierPolicy(_req, res, next) {
+  try {
+    const [tiers, policy] = await Promise.all([
+      getTierPolicy(),
+      TransactionTierPolicy.findOne({ key: 'default' }).select('updatedAt updateReason').lean(),
+    ]);
+    return res.json({
+      tiers,
+      updatedAt: policy?.updatedAt || null,
+      updateReason: policy?.updateReason || '',
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function updateTransactionTierPolicy(req, res, next) {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'A super admin must approve changes to tier limits.' });
+  }
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+  const tiers = validateTierPolicy(req.body?.tiers);
+  if (!tiers || reason.length < 3 || reason.length > 500) {
+    return res.status(400).json({
+      message: 'Provide valid whole-naira tier limits and a reason between 3 and 500 characters.',
+    });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let updatedPolicy;
+    await session.withTransaction(async () => {
+      let policy = await TransactionTierPolicy.findOne({ key: 'default' }).session(session);
+      if (!policy) policy = new TransactionTierPolicy({ key: 'default', tiers });
+      const previousUpdate = policy.updatedAt?.toISOString() || 'default schedule';
+      policy.tiers = tiers;
+      policy.updatedBy = req.user._id;
+      policy.updateReason = reason;
+      await policy.save({ session });
+      await new AdminAuditLog({
+        actorId: req.user._id,
+        action: 'transaction_tier.policy_updated',
+        targetType: 'transaction_tier_policy',
+        targetId: policy._id,
+        previousStatus: previousUpdate,
+        nextStatus: 'updated',
+        note: reason,
+      }).save({ session });
+      updatedPolicy = policy.toObject();
+    });
+
+    return res.json({
+      tiers: updatedPolicy.tiers,
+      updatedAt: updatedPolicy.updatedAt,
+      updateReason: updatedPolicy.updateReason,
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function updateUserTransactionTier(req, res, next) {
+  const { tier, reason: rawReason } = req.body || {};
+  const reason = typeof rawReason === 'string' ? rawReason.trim() : '';
+  if (!Number.isInteger(tier) || tier < 0 || tier > 3 || reason.length < 3 || reason.length > 500) {
+    return res.status(400).json({ message: 'Choose a tier from 0 to 3 and provide a reason between 3 and 500 characters.' });
+  }
+  if (!isValidObjectId(req.params.userId)) {
+    return res.status(400).json({ message: 'Invalid user ID.' });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let updatedUser;
+    await session.withTransaction(async () => {
+      const user = await User.findById(req.params.userId).session(session);
+      if (!user || user.role !== 'user') {
+        const error = new Error('Regular user account not found.');
+        error.status = 404;
+        throw error;
+      }
+      if (tier > 0 && user.isKycVerified !== true) {
+        const error = new Error('A user must have approved identity verification before receiving a verified transaction tier.');
+        error.status = 409;
+        throw error;
+      }
+
+      const previousTier = getTierLevel(user);
+      const tiers = await getTierPolicy(session);
+      user.transactionTier = tier;
+      user.transactionTierUpdatedAt = new Date();
+      user.transactionTierUpdatedBy = req.user._id;
+      user.transactionTierUpdateReason = reason;
+      await user.save({ session });
+      await new AdminAuditLog({
+        actorId: req.user._id,
+        action: 'account.tier_updated',
+        targetType: 'user',
+        targetId: user._id,
+        previousStatus: `Tier ${previousTier}`,
+        nextStatus: `Tier ${tier}`,
+        note: reason,
+      }).save({ session });
+      updatedUser = {
+        ...user.toObject(),
+        transactionTier: tier,
+        transactionTierName: tiers[tier].name,
+      };
+    });
+
+    const tierSummary = await getTierSummary(updatedUser);
+    return res.json({
+      message: `Customer transaction tier updated to Tier ${tier} (${tierSummary.name}).`,
+      user: {
+        id: updatedUser._id.toString(),
+        transactionTier: tierSummary,
+        transactionTierUpdatedAt: updatedUser.transactionTierUpdatedAt,
+        transactionTierUpdateReason: updatedUser.transactionTierUpdateReason,
+      },
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    await session.endSession();
   }
 }
 
@@ -613,6 +758,7 @@ async function listAuditLogs(_req, res, next) {
 
 module.exports = {
   getOverview,
+  getTransactionTierPolicy,
   getUserDetail,
   getWalletSummary,
   listAuditLogs,
@@ -622,6 +768,8 @@ module.exports = {
   listVerificationRequests,
   reviewVerification,
   updateAccountStatus,
+  updateTransactionTierPolicy,
+  updateUserTransactionTier,
   updateTransactionRestriction,
   updateSupportRequest,
 };

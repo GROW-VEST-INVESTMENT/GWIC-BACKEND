@@ -3,7 +3,12 @@ const requireAuth = require('../middleware/requireAuth');
 const requireAdmin = require('../middleware/requireAdmin');
 const requireAdminOrigin = require('../middleware/requireAdminOrigin');
 const {
+  listDepositReviews,
+  reviewDeposit,
+} = require('../controllers/walletController');
+const {
   getOverview,
+  getTransactionTierPolicy,
   getUserDetail,
   getWalletSummary,
   listAuditLogs,
@@ -14,6 +19,8 @@ const {
   reviewVerification,
   updateSupportRequest,
   updateAccountStatus,
+  updateTransactionTierPolicy,
+  updateUserTransactionTier,
   updateTransactionRestriction,
 } = require('../controllers/adminController');
 
@@ -23,10 +30,15 @@ router.use(requireAuth, requireAdmin);
 router.get('/overview', getOverview);
 router.get('/users', listUsers);
 router.get('/users/:userId', getUserDetail);
+router.patch('/users/:userId/transaction-tier', requireAdminOrigin, updateUserTransactionTier);
 router.patch('/users/:userId/account-status', requireAdminOrigin, updateAccountStatus);
 router.patch('/users/:userId/transaction-restriction', requireAdminOrigin, updateTransactionRestriction);
 router.get('/transactions', listTransactions);
 router.get('/operations/wallets', getWalletSummary);
+router.get('/operations/transaction-tiers', getTransactionTierPolicy);
+router.put('/operations/transaction-tiers', requireAdminOrigin, updateTransactionTierPolicy);
+router.get('/operations/deposit-reviews', listDepositReviews);
+router.patch('/operations/deposit-reviews/:reference', requireAdminOrigin, reviewDeposit);
 router.get('/operations/verification-requests', listVerificationRequests);
 router.patch('/operations/verification-requests/:requestId', requireAdminOrigin, reviewVerification);
 router.get('/operations/support-requests', listSupportRequests);

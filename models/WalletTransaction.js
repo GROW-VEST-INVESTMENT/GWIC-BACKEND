@@ -12,6 +12,7 @@ const walletTransactionSchema = new mongoose.Schema(
     },
     type: { type: String, required: true, enum: ['deposit', 'withdrawal'] },
     amountKobo: { type: Number, required: true, min: 1 },
+    tierUsageAt: { type: Date, default: null },
     status: {
       type: String,
       required: true,
@@ -27,8 +28,21 @@ const walletTransactionSchema = new mongoose.Schema(
     accountLast4: { type: String, default: null },
     failureReason: { type: String, default: null },
     refundedAt: { type: Date, default: null },
+    tierAtInitiation: { type: Number, enum: [0, 1, 2, 3], default: null },
+    reviewReason: { type: String, default: null, maxlength: 500 },
+    reviewDecision: { type: String, enum: [null, 'release', 'refund_requested'], default: null },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    reviewedAt: { type: Date, default: null },
+    refundStatus: {
+      type: String,
+      enum: ['none', 'requested', 'pending', 'processed', 'failed', 'unknown'],
+      default: 'none',
+    },
+    refundProviderId: { type: String, default: null },
   },
   { timestamps: true },
 );
+
+walletTransactionSchema.index({ type: 1, status: 1, createdAt: -1 });
 
 module.exports = mongoose.model('WalletTransaction', walletTransactionSchema);

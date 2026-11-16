@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
+const AdminAuditLog = require('../models/AdminAuditLog');
 const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
@@ -8,11 +9,49 @@ const LinkedBankAccount = require('../models/LinkedBankAccount');
 const { paystackRequest, verifyWebhookSignature } = require('../services/paystack');
 const { createJournal } = require('../services/coreSavings');
 const { getOrCreateWallet } = require('../services/wallet');
+const {
+  getLimitViolation,
+  getTierLevel,
+  getTierPolicy,
+  getTierSummary,
+  getTransactionUsage,
+  makeUpgradeMessage,
+} = require('../services/transactionTiers');
 
 const MINIMUM_KOBO = 10000;
-const MAXIMUM_DEPOSIT_KOBO = 100000000;
+const MAXIMUM_DEPOSIT_KOBO = 10000000000;
 const MINIMUM_WITHDRAWAL_KOBO = 10000;
 const TRANSACTION_PAGE_SIZE = 20;
+
+function makeTierLimitError(operation, tier, limitType, nextTier) {
+  const error = new Error(makeUpgradeMessage(operation, tier, limitType, nextTier));
+  error.status = 403;
+  error.code = 'TIER_LIMIT_EXCEEDED';
+  error.details = {
+    upgradeRequired: true,
+    currentTier: { level: tier.level, name: tier.name },
+    nextTier: nextTier ? { level: nextTier.level, name: nextTier.name } : null,
+    limitType,
+  };
+  return error;
+}
+
+async function assertTierLimit(user, operation, amountKobo, session, now = new Date()) {
+  const tiers = await getTierPolicy(session);
+  const tierLevel = getTierLevel(user);
+  const tier = tiers[tierLevel];
+  const usage = await getTransactionUsage(user._id, operation, now, session);
+  const violation = getLimitViolation(amountKobo, tier[operation], usage);
+  if (violation) {
+    throw makeTierLimitError(
+      operation,
+      tier,
+      violation,
+      tiers.find((candidate) => candidate.level > tierLevel) || null,
+    );
+  }
+  return tierLevel;
+}
 
 function normalizeAccountName(value) {
   return value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -24,8 +63,10 @@ async function creditVerifiedDeposit(transaction) {
     await session.withTransaction(async () => {
       const current = await WalletTransaction.findById(transaction._id).session(session);
       if (!current || current.status === 'successful') return;
-      if (current.status !== 'pending') return;
+      if (!['pending', 'requires_approval'].includes(current.status)) return;
 
+      const releaseReview = current.status === 'requires_approval';
+      current.tierUsageAt = current.tierUsageAt || new Date();
       const wallet = await getOrCreateWallet(current.userId, session);
       wallet.balanceKobo += current.amountKobo;
       await wallet.save({ session });
@@ -41,6 +82,7 @@ async function creditVerifiedDeposit(transaction) {
         ],
       });
       current.status = 'successful';
+      if (releaseReview) current.reviewDecision = 'release';
       await current.save({ session });
     });
   } finally {
@@ -86,6 +128,19 @@ async function verifyAndCreditDeposit(transaction) {
     || verified.amount !== transaction.amountKobo
     || verified.currency !== 'NGN'
   ) {
+    if (verified.status === 'success') {
+      await WalletTransaction.updateOne(
+        { _id: transaction._id, status: 'pending' },
+        {
+          $set: {
+            status: 'requires_approval',
+            tierUsageAt: new Date(),
+            reviewReason: 'Provider confirmation did not match the expected amount or currency.',
+          },
+        },
+      );
+      return 'requires_approval';
+    }
     if (['failed', 'abandoned'].includes(verified.status)) {
       await WalletTransaction.updateOne(
         { _id: transaction._id, status: 'pending' },
@@ -97,22 +152,71 @@ async function verifyAndCreditDeposit(transaction) {
     throw error;
   }
 
+  const user = await User.findById(transaction.userId).select('transactionTier isKycVerified').lean();
+  if (!user) {
+    await WalletTransaction.updateOne(
+      { _id: transaction._id, status: 'pending' },
+      {
+        $set: {
+          status: 'requires_approval',
+          tierUsageAt: new Date(),
+          reviewReason: 'The associated customer account could not be loaded for tier validation.',
+        },
+      },
+    );
+    return 'requires_approval';
+  }
+  const tiers = await getTierPolicy();
+  const tierLevel = getTierLevel(user);
+  const tier = tiers[tierLevel];
+  const usage = await getTransactionUsage(
+    transaction.userId,
+    'deposit',
+    new Date(),
+    null,
+    transaction._id,
+  );
+  const violation = getLimitViolation(transaction.amountKobo, tier.deposit, usage);
+  if (violation) {
+    await WalletTransaction.updateOne(
+      { _id: transaction._id, status: 'pending' },
+      {
+        $set: {
+          status: 'requires_approval',
+          tierUsageAt: new Date(),
+          reviewReason: makeUpgradeMessage(
+            'deposit',
+            tier,
+            violation,
+            tiers.find((candidate) => candidate.level > tierLevel) || null,
+          ),
+        },
+      },
+    );
+    return 'requires_approval';
+  }
+
   await creditVerifiedDeposit(transaction);
+  return 'successful';
 }
 
 async function getWallet(req, res, next) {
   try {
-    const [wallet, transactions] = await Promise.all([
+    const [wallet, transactions, user] = await Promise.all([
       Wallet.findOne({ userId: req.user.id }).lean(),
       WalletTransaction.find({ userId: req.user.id })
         .sort({ createdAt: -1 })
         .limit(10)
         .select('reference type amountKobo status bankName accountLast4 createdAt')
         .lean(),
+      User.findById(req.user.id).select('transactionTier isKycVerified').lean(),
     ]);
+    if (!user) return res.status(404).json({ message: 'Your account could not be found.' });
+    const tier = await getTierSummary(user);
     return res.json({
       currency: 'NGN',
       balance: (wallet?.balanceKobo || 0) / 100,
+      tier,
       transactions: transactions.map((item) => ({
         reference: item.reference,
         type: item.type,
@@ -226,7 +330,10 @@ async function resolveWithdrawalAccount(req, res, next) {
 
 async function initializeDeposit(req, res, next) {
   const amountNaira = req.body?.amount;
-  if (!Number.isSafeInteger(amountNaira) || amountNaira * 100 < MINIMUM_KOBO || amountNaira * 100 > MAXIMUM_DEPOSIT_KOBO) {
+  if (!Number.isSafeInteger(amountNaira)
+    || !Number.isSafeInteger(amountNaira * 100)
+    || amountNaira * 100 < MINIMUM_KOBO
+    || amountNaira * 100 > MAXIMUM_DEPOSIT_KOBO) {
     return res.status(400).json({ message: 'Deposit between ₦100 and ₦1,000,000.' });
   }
   if (!req.user.email) {
@@ -240,13 +347,31 @@ async function initializeDeposit(req, res, next) {
     if (!frontendUrl) {
       return res.status(503).json({ message: 'Payment return address is not configured.' });
     }
-    [transaction] = await WalletTransaction.create([{
-      reference,
-      userId: req.user.id,
-      type: 'deposit',
-      amountKobo: amountNaira * 100,
-      status: 'pending',
-    }]);
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const user = await User.findById(req.user.id).select('+tierUsageRevision transactionTier isKycVerified').session(session);
+        if (!user) {
+          const error = new Error('Your account could not be found.');
+          error.status = 404;
+          throw error;
+        }
+        const tierLevel = await assertTierLimit(user, 'deposit', amountNaira * 100, session);
+        user.tierUsageRevision = (user.tierUsageRevision || 0) + 1;
+        await user.save({ session });
+        [transaction] = await WalletTransaction.create([{
+          reference,
+          userId: user._id,
+          type: 'deposit',
+          amountKobo: amountNaira * 100,
+          status: 'pending',
+          tierAtInitiation: tierLevel,
+        }], { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+
     const payment = await paystackRequest('/transaction/initialize', {
       method: 'POST',
       body: JSON.stringify({
@@ -265,6 +390,9 @@ async function initializeDeposit(req, res, next) {
       reference,
     });
   } catch (error) {
+    if (error.code === 'TIER_LIMIT_EXCEEDED') {
+      return res.status(error.status).json({ message: error.message, ...error.details });
+    }
     if (transaction && !transaction.authorizationUrl) {
       await WalletTransaction.updateOne(
         { _id: transaction._id, status: 'pending' },
@@ -285,10 +413,23 @@ async function verifyDeposit(req, res, next) {
     });
     if (!transaction) return res.status(404).json({ message: 'Deposit reference was not found.' });
     if (transaction.status === 'successful') return res.json({ status: 'successful' });
+    if (transaction.status === 'requires_approval') {
+      return res.status(202).json({
+        status: 'requires_approval',
+        tierUsageAt: new Date(),
+        message: 'Your payment is on hold for an admin review and is not available in your wallet yet.',
+      });
+    }
     if (transaction.status !== 'pending') return res.status(409).json({ message: 'This deposit is no longer pending.' });
 
-    await verifyAndCreditDeposit(transaction);
-    return res.json({ status: 'successful' });
+    const status = await verifyAndCreditDeposit(transaction);
+    if (status === 'requires_approval') {
+      return res.status(202).json({
+        status,
+        message: 'Your payment is on hold for an admin review and is not available in your wallet yet.',
+      });
+    }
+    return res.json({ status });
   } catch (error) {
     return next(error);
   }
@@ -340,6 +481,10 @@ async function createWithdrawal(req, res, next) {
       });
     }
 
+    const tierUser = await User.findById(req.user.id).select('transactionTier isKycVerified');
+    if (!tierUser) return res.status(404).json({ message: 'Your account could not be found.' });
+    await assertTierLimit(tierUser, 'withdrawal', amountNaira * 100);
+
     const availableWallet = await Wallet.findOne({ userId: req.user.id }).select('balanceKobo').lean();
     if (!availableWallet || availableWallet.balanceKobo < amountNaira * 100) {
       return res.status(400).json({ message: 'Your available wallet balance is too low for this withdrawal.' });
@@ -385,6 +530,18 @@ async function createWithdrawal(req, res, next) {
     const session = await mongoose.startSession();
     try {
       await session.withTransaction(async () => {
+        const currentUser = await User.findById(req.user.id)
+          .select('+tierUsageRevision transactionTier isKycVerified')
+          .session(session);
+        if (!currentUser) {
+          const error = new Error('Your account could not be found.');
+          error.status = 404;
+          throw error;
+        }
+        await assertTierLimit(currentUser, 'withdrawal', amountNaira * 100, session);
+        currentUser.tierUsageRevision = (currentUser.tierUsageRevision || 0) + 1;
+        await currentUser.save({ session });
+
         const wallet = await getOrCreateWallet(req.user.id, session);
         const amountKobo = amountNaira * 100;
         if (wallet.balanceKobo < amountKobo) {
@@ -450,6 +607,9 @@ async function createWithdrawal(req, res, next) {
       status: transferStatus,
     });
   } catch (error) {
+    if (error.code === 'TIER_LIMIT_EXCEEDED') {
+      return res.status(error.status).json({ message: error.message, ...error.details });
+    }
     if (error.code === 11000 && typeof idempotencyKey === 'string') {
       const existing = await WalletTransaction.findOne({ idempotencyKey, userId: req.user.id });
       if (existing) {
@@ -474,6 +634,213 @@ async function createWithdrawal(req, res, next) {
   }
 }
 
+async function listDepositReviews(_req, res, next) {
+  try {
+    const transactions = await WalletTransaction.find({
+      type: 'deposit',
+      status: 'requires_approval',
+    })
+      .sort({ createdAt: 1 })
+      .limit(100)
+      .populate('userId', 'name email')
+      .lean();
+    return res.json({
+      transactions: transactions.map((transaction) => ({
+        reference: transaction.reference,
+        userId: transaction.userId?._id?.toString() || null,
+        user: transaction.userId?.name || 'Unknown user',
+        email: transaction.userId?.email || '',
+        amount: transaction.amountKobo / 100,
+        reason: transaction.reviewReason || 'Payment requires review.',
+        tierAtInitiation: transaction.tierAtInitiation,
+        refundStatus: transaction.refundStatus,
+        reviewDecision: transaction.reviewDecision,
+        reviewedAt: transaction.reviewedAt,
+        createdAt: transaction.createdAt,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function reviewDeposit(req, res, next) {
+  const { decision, reason: rawReason } = req.body || {};
+  const reason = typeof rawReason === 'string' ? rawReason.trim() : '';
+  if (!['release', 'refund'].includes(decision) || reason.length < 3 || reason.length > 500) {
+    return res.status(400).json({
+      message: 'Choose release or refund and provide a review reason between 3 and 500 characters.',
+    });
+  }
+
+  let transaction;
+  try {
+    transaction = await WalletTransaction.findOne({
+      reference: req.params.reference,
+      type: 'deposit',
+      status: 'requires_approval',
+    });
+    if (!transaction) return res.status(404).json({ message: 'Held deposit not found.' });
+    const refundInProgress = ['requested', 'pending', 'unknown', 'processed'].includes(transaction.refundStatus);
+    if (transaction.reviewDecision || refundInProgress) {
+      return res.status(409).json({ message: 'This deposit already has a review decision in progress.' });
+    }
+
+    if (decision === 'release') {
+      const verified = await paystackRequest(
+        `/transaction/verify/${encodeURIComponent(transaction.reference)}`,
+      );
+      if (
+        verified.status !== 'success'
+        || verified.reference !== transaction.reference
+        || verified.amount !== transaction.amountKobo
+        || verified.currency !== 'NGN'
+      ) {
+        return res.status(409).json({
+          message: 'The provider could not confirm the expected amount and currency, so this deposit cannot be released.',
+        });
+      }
+
+      const session = await mongoose.startSession();
+      try {
+        await session.withTransaction(async () => {
+          const current = await WalletTransaction.findOne({
+            _id: transaction._id,
+            type: 'deposit',
+            status: 'requires_approval',
+            reviewDecision: null,
+          }).session(session);
+          if (!current || ['requested', 'pending', 'unknown', 'processed'].includes(current.refundStatus)) {
+            const error = new Error('This deposit already has a review decision in progress.');
+            error.status = 409;
+            throw error;
+          }
+
+          const wallet = await getOrCreateWallet(current.userId, session);
+          wallet.balanceKobo += current.amountKobo;
+          await wallet.save({ session });
+          await createJournal({
+            session,
+            idempotencyKey: `wallet-deposit:${current.reference}`,
+            transactionType: 'DEPOSIT',
+            description: 'Admin-released Paystack wallet deposit.',
+            timestamp: new Date(),
+            postings: [
+              { userId: null, accountCode: 'PAYSTACK_CLEARING', amountKobo: current.amountKobo, entryType: 'DEBIT' },
+              { userId: current.userId, accountCode: 'USER_WALLET', amountKobo: current.amountKobo, entryType: 'CREDIT' },
+            ],
+          });
+          current.status = 'successful';
+          current.reviewDecision = 'release';
+          current.reviewedBy = req.user._id;
+          current.reviewedAt = new Date();
+          current.reviewReason = reason;
+          await current.save({ session });
+          await new AdminAuditLog({
+            actorId: req.user._id,
+            action: 'transaction.deposit_reviewed',
+            targetType: 'wallet_transaction',
+            targetId: current._id,
+            previousStatus: 'requires_approval',
+            nextStatus: 'successful',
+            note: `Released: ${reason}`,
+          }).save({ session });
+        });
+      } finally {
+        await session.endSession();
+      }
+      return res.json({ message: 'Deposit verified and released to the customer wallet.', status: 'successful' });
+    }
+
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const current = await WalletTransaction.findOne({
+          _id: transaction._id,
+          type: 'deposit',
+          status: 'requires_approval',
+          reviewDecision: null,
+        }).session(session);
+        if (!current || ['requested', 'pending', 'unknown', 'processed'].includes(current.refundStatus)) {
+          const error = new Error('This deposit already has a review decision in progress.');
+          error.status = 409;
+          throw error;
+        }
+        current.reviewDecision = 'refund_requested';
+        current.refundStatus = 'requested';
+        current.reviewedBy = req.user._id;
+        current.reviewedAt = new Date();
+        current.reviewReason = reason;
+        await current.save({ session });
+        await new AdminAuditLog({
+          actorId: req.user._id,
+          action: 'transaction.deposit_reviewed',
+          targetType: 'wallet_transaction',
+          targetId: current._id,
+          previousStatus: 'requires_approval',
+          nextStatus: 'refund_requested',
+          note: reason,
+        }).save({ session });
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    try {
+      const refund = await paystackRequest('/refund', {
+        method: 'POST',
+        body: JSON.stringify({
+          transaction: transaction.reference,
+          customer_note: 'Deposit held for transaction tier review.',
+          merchant_note: reason,
+        }),
+      });
+      const status = refund.status === 'processed'
+        ? 'processed'
+        : refund.status === 'failed' ? 'failed' : 'pending';
+      await WalletTransaction.updateOne(
+        { _id: transaction._id, reviewDecision: 'refund_requested' },
+        {
+          $set: {
+            refundStatus: status,
+            refundProviderId: refund.id ? String(refund.id) : null,
+            ...(status === 'processed' ? { status: 'reversed', refundedAt: new Date() } : {}),
+            ...(status === 'failed' ? { reviewDecision: null } : {}),
+          },
+        },
+      );
+      return res.status(202).json({
+        message: status === 'processed'
+          ? 'Refund confirmed by the payment provider.'
+          : status === 'failed'
+            ? 'The payment provider could not complete the refund. This deposit remains held for review.'
+            : 'Refund requested. The deposit remains unavailable until the provider confirms the refund.',
+        status: status === 'processed' ? 'reversed' : 'requires_approval',
+        refundStatus: status,
+      });
+    } catch (error) {
+      if (error.status === 400 || error.code === 'PAYSTACK_AUTH') {
+        await WalletTransaction.updateOne(
+          { _id: transaction._id, reviewDecision: 'refund_requested' },
+          { $set: { refundStatus: 'failed', reviewDecision: null } },
+        );
+        return next(error);
+      }
+      await WalletTransaction.updateOne(
+        { _id: transaction._id, reviewDecision: 'refund_requested' },
+        { $set: { refundStatus: 'unknown' } },
+      );
+      return res.status(202).json({
+        message: 'The refund request outcome could not be confirmed. Funds remain held; check the payment provider before retrying.',
+        status: 'requires_approval',
+        refundStatus: 'unknown',
+      });
+    }
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function handlePaystackWebhook(req, res) {
   const signature = req.headers['x-paystack-signature'];
   if (!verifyWebhookSignature(req.body, signature)) {
@@ -492,6 +859,32 @@ async function handlePaystackWebhook(req, res) {
     if (event.event === 'charge.success' && typeof reference === 'string') {
       const transaction = await WalletTransaction.findOne({ reference, type: 'deposit', status: 'pending' });
       if (transaction) await verifyAndCreditDeposit(transaction);
+    }
+    if (['refund.processed', 'refund.failed'].includes(event.event)) {
+      const refundId = event.data?.id ? String(event.data.id) : '';
+      const originalReference = event.data?.transaction?.reference
+        || event.data?.transaction_reference
+        || '';
+      const transaction = await WalletTransaction.findOne({
+        type: 'deposit',
+        reviewDecision: 'refund_requested',
+        $or: [
+          ...(refundId ? [{ refundProviderId: refundId }] : []),
+          ...(originalReference ? [{ reference: originalReference }] : []),
+        ],
+      });
+      if (transaction) {
+        const processed = event.event === 'refund.processed';
+        await WalletTransaction.updateOne(
+          { _id: transaction._id, reviewDecision: 'refund_requested' },
+          {
+            $set: {
+              refundStatus: processed ? 'processed' : 'failed',
+              ...(processed ? { status: 'reversed', refundedAt: new Date() } : { reviewDecision: null }),
+            },
+          },
+        );
+      }
     }
     if (
       ['transfer.success', 'transfer.failed', 'transfer.reversed'].includes(event.event)
@@ -526,8 +919,11 @@ module.exports = {
   getBanks,
   initializeDeposit,
   verifyDeposit,
+  verifyAndCreditDeposit,
   resolveWithdrawalAccount,
   createWithdrawal,
+  listDepositReviews,
+  reviewDeposit,
   handlePaystackWebhook,
   normalizeAccountName,
 };
