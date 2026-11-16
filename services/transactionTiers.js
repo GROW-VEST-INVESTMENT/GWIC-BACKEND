@@ -33,6 +33,42 @@ const ACTIVE_STATUSES = {
   withdrawal: ['processing', 'requires_approval', 'successful'],
 };
 
+const TIER_VERIFICATION_STEPS = [
+  {
+    level: 0,
+    title: 'Starter account',
+    requirements: ['Your account is active. Deposit and withdrawal limits remain at Tier 0.'],
+  },
+  {
+    level: 1,
+    title: 'Identity verification',
+    requirements: [
+      'Confirm your legal name and date of birth.',
+      'Complete identity matching through an approved BVN or NIN verification provider.',
+      'An administrator reviews the provider result before this tier is approved.',
+    ],
+  },
+  {
+    level: 2,
+    title: 'Address verification',
+    requirements: [
+      'Tier 1 identity verification must already be approved.',
+      'Complete address checks through an approved verification provider.',
+      'Complete any additional liveness check required by your licensed partner.',
+      'An administrator reviews the provider result before this tier is approved.',
+    ],
+  },
+  {
+    level: 3,
+    title: 'Enhanced review',
+    requirements: [
+      'Tier 2 checks must already be approved.',
+      'Complete occupation and source-of-funds checks through an approved secure process.',
+      'A super administrator must complete the final manual review.',
+    ],
+  },
+];
+
 function getTierLevel(user) {
   if (Number.isInteger(user?.transactionTier) && user.transactionTier >= 0 && user.transactionTier <= 3) {
     return user.transactionTier;
@@ -41,9 +77,12 @@ function getTierLevel(user) {
 }
 
 function serializeTier(tier) {
+  const verification = TIER_VERIFICATION_STEPS[tier.level];
   return {
     level: tier.level,
     name: tier.name,
+    title: verification.title,
+    requirements: verification.requirements,
     deposit: {
       perTransaction: tier.deposit.perTransaction,
       perDay: tier.deposit.perDay,
@@ -201,6 +240,7 @@ function validateTierPolicy(input) {
 module.exports = {
   ACTIVE_STATUSES,
   DEFAULT_TIERS,
+  TIER_VERIFICATION_STEPS,
   getLimitViolation,
   getTierLevel,
   getTierPolicy,

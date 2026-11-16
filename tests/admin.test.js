@@ -407,6 +407,129 @@ test('KYC decisions require evidence confirmation and a meaningful reviewer note
   }
 });
 
+test('only super admins can approve Tier 3 verification requests', async () => {
+  const originalStartSession = mongoose.startSession;
+  const originalFindOne = VerificationRequest.findOne;
+  const originalFindById = User.findById;
+  const request = { requestedTier: 3, status: 'pending', save: async () => {} };
+  const user = { transactionTier: 2, isKycVerified: true };
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  VerificationRequest.findOne = () => ({ session: async () => request });
+  User.findById = () => ({ session: async () => user });
+  try {
+    const response = makeResponse();
+    let forwardedError;
+    await reviewVerification(
+      {
+        user: { id: '507f1f77bcf86cd799439013', role: 'admin' },
+        body: {
+          decision: 'verified',
+          note: 'Enhanced checks complete',
+          evidenceReviewed: true,
+          verificationProvider: 'Approved provider',
+          verificationReference: 'ref-123',
+          identityCheckConfirmed: true,
+          addressCheckConfirmed: true,
+          sourceOfFundsCheckConfirmed: true,
+        },
+        params: { requestId: '507f1f77bcf86cd799439011' },
+      },
+      response,
+      (error) => { forwardedError = error; },
+    );
+    assert.equal(forwardedError.status, 403);
+    assert.match(forwardedError.message, /only a super admin/i);
+  } finally {
+    mongoose.startSession = originalStartSession;
+    VerificationRequest.findOne = originalFindOne;
+    User.findById = originalFindById;
+  }
+});
+
+test('legacy pending verification requests are reviewed as Tier 1', async () => {
+  const originalStartSession = mongoose.startSession;
+  const originalFindOne = VerificationRequest.findOne;
+  const originalFindById = User.findById;
+  const originalAuditSave = AdminAuditLog.prototype.save;
+  const request = {
+    id: '507f1f77bcf86cd799439011',
+    _id: new mongoose.Types.ObjectId('507f1f77bcf86cd799439011'),
+    userId: '507f1f77bcf86cd799439012',
+    status: 'pending',
+    save: async () => {},
+  };
+  const user = { transactionTier: 0, isKycVerified: false, save: async () => {} };
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  VerificationRequest.findOne = () => ({ session: async () => request });
+  User.findById = () => ({ session: async () => user });
+  AdminAuditLog.prototype.save = async () => {};
+  try {
+    const response = makeResponse();
+    let forwardedError;
+    await reviewVerification(
+      {
+        user: { id: '507f1f77bcf86cd799439013', _id: new mongoose.Types.ObjectId(), role: 'admin' },
+        body: {
+          decision: 'verified',
+          note: 'Tier 1 identity review completed',
+          evidenceReviewed: true,
+          verificationProvider: 'Approved provider',
+          verificationReference: 'ref-legacy-123',
+          identityCheckConfirmed: true,
+        },
+        params: { requestId: '507f1f77bcf86cd799439011' },
+      },
+      response,
+      (error) => { forwardedError = error; },
+    );
+    assert.equal(forwardedError, undefined);
+    assert.equal(response.body.request.requestedTier, 1);
+    assert.equal(request.requestedTier, 1);
+    assert.equal(user.transactionTier, 1);
+  } finally {
+    mongoose.startSession = originalStartSession;
+    VerificationRequest.findOne = originalFindOne;
+    User.findById = originalFindById;
+    AdminAuditLog.prototype.save = originalAuditSave;
+  }
+});
+
+test('direct tier assignment cannot bypass staged verification approval', async () => {
+  const originalStartSession = mongoose.startSession;
+  const originalFindById = User.findById;
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  User.findById = () => ({
+    session: async () => ({ role: 'user', transactionTier: 1, isKycVerified: true }),
+  });
+  try {
+    const response = makeResponse();
+    let forwardedError;
+    await updateUserTransactionTier(
+      {
+        user: { id: '507f1f77bcf86cd799439013', _id: '507f1f77bcf86cd799439013' },
+        params: { userId: '507f1f77bcf86cd799439011' },
+        body: { tier: 2, reason: 'Upgrade review' },
+      },
+      response,
+      (error) => { forwardedError = error; },
+    );
+    assert.equal(forwardedError.status, 409);
+    assert.match(forwardedError.message, /staged verification request workflow/i);
+  } finally {
+    mongoose.startSession = originalStartSession;
+    User.findById = originalFindById;
+  }
+});
+
 test('support status changes require a valid status and staff note', async () => {
   for (const body of [
     { status: 'closed', note: 'Handled this request' },

@@ -168,6 +168,99 @@ test('verification requests require explicit consent and a valid date', async ()
   }
 });
 
+test('verification requests the next tier and does not change the current tier', async () => {
+  const originalFindById = User.findById;
+  const originalFindOne = require('../models/VerificationRequest').findOne;
+  const originalCreate = require('../models/VerificationRequest').create;
+  const VerificationRequest = require('../models/VerificationRequest');
+  let created;
+  User.findById = () => ({ select: async () => ({ transactionTier: 1, isKycVerified: true }) });
+  VerificationRequest.findOne = () => ({ lean: async () => null });
+  VerificationRequest.create = async (document) => {
+    created = document;
+    return { id: '507f1f77bcf86cd799439012', status: 'pending' };
+  };
+  try {
+    const response = makeResponse();
+    await createVerificationRequest(
+      {
+        user: { id: '507f1f77bcf86cd799439011' },
+        body: {
+          legalName: '  Ada   Example ',
+          dateOfBirth: '1990-01-01',
+          consent: true,
+          addressLine: '12 Example Street',
+          city: 'Lagos',
+          state: 'Lagos',
+        },
+      },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.body.requestedTier, 2);
+    assert.match(response.body.message, /current tier and limits remain unchanged/i);
+    assert.equal(created.requestedTier, 2);
+    assert.equal(created.legalName, 'Ada Example');
+    assert.equal(created.consentVersion, 'tier-verification-v2');
+  } finally {
+    User.findById = originalFindById;
+    VerificationRequest.findOne = originalFindOne;
+    VerificationRequest.create = originalCreate;
+  }
+});
+
+test('Tier 2 verification requests require and store residential address details', async () => {
+  const VerificationRequest = require('../models/VerificationRequest');
+  const originals = {
+    findById: User.findById,
+    findOne: VerificationRequest.findOne,
+    create: VerificationRequest.create,
+  };
+  let created;
+  User.findById = () => ({ select: async () => ({ transactionTier: 1, isKycVerified: true }) });
+  VerificationRequest.findOne = () => ({ lean: async () => null });
+  VerificationRequest.create = async (document) => {
+    created = document;
+    return { id: '507f1f77bcf86cd799439013', status: 'pending' };
+  };
+  try {
+    const invalidResponse = makeResponse();
+    await createVerificationRequest(
+      { user: { id: '507f1f77bcf86cd799439011' }, body: { legalName: 'Ada Example', dateOfBirth: '1990-01-01', consent: true } },
+      invalidResponse,
+      (error) => { throw error; },
+    );
+    assert.equal(invalidResponse.statusCode, 400);
+
+    const response = makeResponse();
+    await createVerificationRequest(
+      {
+        user: { id: '507f1f77bcf86cd799439011' },
+        body: {
+          legalName: 'Ada Example',
+          dateOfBirth: '1990-01-01',
+          consent: true,
+          addressLine: '12 Example Street',
+          city: 'Lagos',
+          state: 'Lagos',
+        },
+      },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 201);
+    assert.equal(created.requestedTier, 2);
+    assert.equal(created.addressLine, '12 Example Street');
+    assert.equal(created.city, 'Lagos');
+    assert.equal(created.state, 'Lagos');
+  } finally {
+    User.findById = originals.findById;
+    VerificationRequest.findOne = originals.findOne;
+    VerificationRequest.create = originals.create;
+  }
+});
+
 test('support tickets require a valid topic and a sufficiently detailed message', async () => {
   const response = makeResponse();
   await createSupportRequest(

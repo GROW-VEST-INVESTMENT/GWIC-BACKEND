@@ -13,6 +13,11 @@ const {
   uploadProfilePhoto,
 } = require('../services/profilePhotoStorage');
 const { normalizeAccountName } = require('./walletController');
+const {
+  getTierLevel,
+  getTierPolicy,
+  serializeTier,
+} = require('../services/transactionTiers');
 
 const NOTIFICATION_FIELDS = ['emailAccountUpdates', 'emailSecurityAlerts', 'pushNotifications'];
 const PREFERENCE_FIELDS = ['hideWalletBalance', 'theme', 'language'];
@@ -319,22 +324,35 @@ async function changePassword(req, res, next) {
 async function getVerificationStatus(req, res, next) {
   try {
     const [user, request] = await Promise.all([
-      User.findById(req.user.id).select('isKycVerified'),
+      User.findById(req.user.id).select('isKycVerified transactionTier'),
       VerificationRequest.findOne({ userId: req.user.id }).sort({ createdAt: -1 }).lean(),
     ]);
     if (!user) return sendError(res, 404, 'Account not found.');
+    const [tiers, currentTier] = await Promise.all([
+      getTierPolicy(),
+      Promise.resolve(getTierLevel(user)),
+    ]);
+    const nextTier = tiers.find((tier) => tier.level === currentTier + 1) || null;
     return res.json({
-      status: user.isKycVerified ? 'verified' : request?.status || 'not_started',
+      status: request?.status === 'pending'
+        ? 'pending'
+        : request?.status === 'rejected'
+          ? 'rejected'
+          : currentTier > 0 ? 'verified' : request?.status || 'not_started',
+      currentTier,
+      nextTier: nextTier ? serializeTier(nextTier) : null,
+      tiers: tiers.map(serializeTier),
       request: request ? {
         id: request._id.toString(),
         legalName: request.legalName,
+        requestedTier: request.requestedTier || 1,
         status: request.status,
         createdAt: request.createdAt,
         reviewedAt: request.reviewedAt,
       } : null,
-      canSubmit: !user.isKycVerified && request?.status !== 'pending',
-      method: 'manual_review',
-      notice: 'Do not submit BVN, passwords, or identity-document numbers here. Staff review this request separately; submitting it does not verify your account.',
+      canSubmit: currentTier < 3 && request?.status !== 'pending',
+      method: 'admin_review',
+      notice: 'An administrator manually reviews verification requests. This app does not perform identity checks; approval requires checks through a separately approved verification process. Do not enter BVN/NIN numbers, passwords, or upload identity documents here. Submitting a request does not verify your account or change its tier.',
     });
   } catch (error) {
     return next(error);
@@ -343,9 +361,28 @@ async function getVerificationStatus(req, res, next) {
 
 async function createVerificationRequest(req, res, next) {
   const body = req.body || {};
-  const { legalName, dateOfBirth, consent } = body;
-  if (Object.keys(body).some((key) => !['legalName', 'dateOfBirth', 'consent'].includes(key))) {
-    return sendError(res, 400, 'Only legal name, date of birth, and consent are accepted. Do not submit BVN or identity-document numbers.');
+  const {
+    legalName,
+    dateOfBirth,
+    consent,
+    addressLine,
+    city,
+    state,
+    occupation,
+    sourceOfFundsCategory,
+  } = body;
+  const allowedFields = [
+    'legalName',
+    'dateOfBirth',
+    'consent',
+    'addressLine',
+    'city',
+    'state',
+    'occupation',
+    'sourceOfFundsCategory',
+  ];
+  if (Object.keys(body).some((key) => !allowedFields.includes(key))) {
+    return sendError(res, 400, 'Unsupported verification details. Do not submit BVN/NIN numbers or identity-document details.');
   }
   if (
     typeof legalName !== 'string'
@@ -367,21 +404,54 @@ async function createVerificationRequest(req, res, next) {
   }
 
   try {
-    const user = await User.findById(req.user.id).select('name isKycVerified');
+    const user = await User.findById(req.user.id).select('name isKycVerified transactionTier');
     if (!user) return sendError(res, 404, 'Account not found.');
-    if (user.isKycVerified) return sendError(res, 409, 'Your account is already verified.');
+    const currentTier = getTierLevel(user);
+    if (currentTier >= 3) return sendError(res, 409, 'Your account is already at the highest transaction tier.');
     const existing = await VerificationRequest.findOne({ userId: req.user.id, status: 'pending' }).lean();
     if (existing) return sendError(res, 409, 'Your verification request is already awaiting review.');
+    const requestedTier = currentTier + 1;
+    const normalizedAddress = [addressLine, city, state];
+    if (requestedTier >= 2 && normalizedAddress.some((value, index) => (
+      typeof value !== 'string'
+      || value.trim().length < 2
+      || value.trim().length > [150, 80, 80][index]
+    ))) {
+      return sendError(res, 400, 'Tier 2 and Tier 3 requests require your residential address, city, and state.');
+    }
+    if (
+      requestedTier >= 3
+      && (
+        typeof occupation !== 'string'
+        || occupation.trim().length < 2
+        || occupation.trim().length > 100
+        || !['salary', 'business_income', 'savings', 'investments', 'other'].includes(sourceOfFundsCategory)
+      )
+    ) {
+      return sendError(res, 400, 'Tier 3 requests require your occupation and a source-of-funds category.');
+    }
     const request = await VerificationRequest.create({
       userId: req.user.id,
       legalName: legalName.trim().replace(/\s+/g, ' '),
       dateOfBirth: birthDate,
+      requestedTier,
+      ...(requestedTier >= 2 && {
+        addressLine: addressLine.trim(),
+        city: city.trim(),
+        state: state.trim(),
+      }),
+      ...(requestedTier >= 3 && {
+        occupation: occupation.trim(),
+        sourceOfFundsCategory,
+      }),
       consentedAt: new Date(),
+      consentVersion: 'tier-verification-v2',
     });
     return res.status(201).json({
-      message: 'Your verification request was recorded and is awaiting manual review.',
+      message: `Your Tier ${requestedTier} verification request was recorded and is awaiting administrator review. Your current tier and limits remain unchanged until approved.`,
       status: request.status,
       requestId: request.id,
+      requestedTier,
     });
   } catch (error) {
     if (error.code === 11000) return sendError(res, 409, 'Your verification request is already awaiting review.');

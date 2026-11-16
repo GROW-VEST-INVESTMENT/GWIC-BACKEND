@@ -303,6 +303,11 @@ async function updateUserTransactionTier(req, res, next) {
       }
 
       const previousTier = getTierLevel(user);
+      if (tier > previousTier) {
+        const error = new Error('Tier upgrades must be approved through the staged verification request workflow.');
+        error.status = 409;
+        throw error;
+      }
       const tiers = await getTierPolicy(session);
       user.transactionTier = tier;
       user.transactionTierUpdatedAt = new Date();
@@ -539,7 +544,7 @@ async function listVerificationRequests(req, res, next) {
       VerificationRequest.find(filter)
         .sort({ createdAt: -1 })
         .limit(100)
-        .populate('userId', 'name email phone')
+        .populate('userId', 'name email phone transactionTier isKycVerified')
         .lean(),
       VerificationRequest.countDocuments({ status: 'pending' }),
       VerificationRequest.countDocuments({ status: 'verified' }),
@@ -557,7 +562,16 @@ async function listVerificationRequests(req, res, next) {
         } : null,
         legalName: request.legalName,
         dateOfBirth: request.dateOfBirth,
+        addressLine: request.addressLine || '',
+        city: request.city || '',
+        state: request.state || '',
+        occupation: request.occupation || '',
+        sourceOfFundsCategory: request.sourceOfFundsCategory || '',
+        requestedTier: request.requestedTier || 1,
+        currentTier: request.userId ? getTierLevel(request.userId) : 0,
         status: request.status,
+        verificationProvider: request.verificationProvider || '',
+        verificationReference: request.verificationReference || '',
         createdAt: request.createdAt,
         reviewedAt: request.reviewedAt,
       })),
@@ -568,16 +582,41 @@ async function listVerificationRequests(req, res, next) {
 }
 
 async function reviewVerification(req, res, next) {
-  const { decision, note, evidenceReviewed } = req.body || {};
+  const {
+    decision,
+    note,
+    evidenceReviewed,
+    verificationProvider: rawProvider,
+    verificationReference: rawReference,
+    identityCheckConfirmed,
+    addressCheckConfirmed,
+    sourceOfFundsCheckConfirmed,
+  } = req.body || {};
   const normalizedNote = typeof note === 'string' ? note.trim() : '';
+  const verificationProvider = typeof rawProvider === 'string' ? rawProvider.trim() : '';
+  const verificationReference = typeof rawReference === 'string' ? rawReference.trim() : '';
   if (
     !['verified', 'rejected'].includes(decision)
     || normalizedNote.length < 3
     || normalizedNote.length > 500
-    || evidenceReviewed !== true
   ) {
     return res.status(400).json({
-      message: 'Choose verified or rejected, confirm evidence was reviewed, and provide a note between 3 and 500 characters.',
+      message: 'Choose verified or rejected and provide a note between 3 and 500 characters.',
+    });
+  }
+  if (
+    decision === 'verified'
+    && (
+      evidenceReviewed !== true
+      || verificationProvider.length < 2
+      || verificationProvider.length > 100
+      || verificationReference.length < 3
+      || verificationReference.length > 120
+      || identityCheckConfirmed !== true
+    )
+  ) {
+    return res.status(400).json({
+      message: 'Approval requires a provider and reference, identity-check confirmation, and confirmation that evidence was reviewed.',
     });
   }
   if (!isValidObjectId(req.params.requestId)) {
@@ -605,24 +644,67 @@ async function reviewVerification(req, res, next) {
         throw error;
       }
 
+      const requestedTier = request.requestedTier || 1;
       const previousStatus = request.status;
+      if (decision === 'verified') {
+        const currentTier = getTierLevel(user);
+        if (requestedTier !== currentTier + 1) {
+          const error = new Error('This request no longer matches the customer’s next eligible tier. Review the account before deciding.');
+          error.status = 409;
+          throw error;
+        }
+        if (requestedTier === 3 && req.user.role !== 'super_admin') {
+          const error = new Error('Only a super admin can approve Tier 3 enhanced verification.');
+          error.status = 403;
+          throw error;
+        }
+        if (
+          evidenceReviewed !== true
+          || verificationProvider.length < 2
+          || verificationProvider.length > 100
+          || verificationReference.length < 3
+          || verificationReference.length > 120
+          || identityCheckConfirmed !== true
+          || (requestedTier >= 2 && addressCheckConfirmed !== true)
+          || (requestedTier >= 3 && sourceOfFundsCheckConfirmed !== true)
+        ) {
+          const error = new Error('Approval requires a provider and reference, the required tier checks, and confirmation that evidence was reviewed.');
+          error.status = 400;
+          throw error;
+        }
+        request.verificationProvider = verificationProvider;
+        request.verificationReference = verificationReference;
+        request.requestedTier = requestedTier;
+        request.identityCheckConfirmed = true;
+        request.addressCheckConfirmed = requestedTier >= 2;
+        request.sourceOfFundsCheckConfirmed = requestedTier >= 3;
+        user.transactionTier = requestedTier;
+        user.transactionTierUpdatedAt = new Date();
+        user.transactionTierUpdatedBy = req.user._id;
+        user.transactionTierUpdateReason = `Approved verification request ${request.id}`;
+        user.isKycVerified = true;
+      }
       request.status = decision;
       request.reviewedAt = new Date();
       request.reviewerNote = normalizedNote;
-      user.isKycVerified = decision === 'verified';
       await request.save({ session });
-      await user.save({ session });
+      if (decision === 'verified') await user.save({ session });
       await new AdminAuditLog({
         actorId: req.user.id,
         action: 'kyc.reviewed',
         targetType: 'verification_request',
         targetId: request._id,
         previousStatus,
-        nextStatus: decision,
+        nextStatus: decision === 'verified' ? `verified: Tier ${requestedTier}` : decision,
         note: normalizedNote,
-        evidenceReviewed: true,
+        evidenceReviewed: decision === 'verified' && evidenceReviewed === true,
       }).save({ session });
-      reviewed = { id: request.id, status: request.status, reviewedAt: request.reviewedAt };
+      reviewed = {
+        id: request.id,
+        status: request.status,
+        requestedTier,
+        reviewedAt: request.reviewedAt,
+      };
     });
     return res.json({ message: 'Verification review saved.', request: reviewed });
   } catch (error) {
