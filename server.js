@@ -23,6 +23,7 @@ const notificationsRoutes = require('./routes/notificationsRoutes');
 const connectRoutes = require('./routes/connectRoutes');
 const connectAdminRoutes = require('./routes/connectAdminRoutes');
 const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
+const ensureConnectApplicationIndexes = require('./services/connectApplicationIndexes');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
 const app = express();
@@ -302,6 +303,14 @@ app.use((error, req, res, next) => {
   if (res.headersSent) {
     return next(error);
   }
+  if (error instanceof require('multer').MulterError) {
+    const status = error.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    return res.status(status).json({
+      message: error.code === 'LIMIT_FILE_SIZE'
+        ? 'Each application document must be 10 MB or smaller.'
+        : 'Attach no more than five application documents.',
+    });
+  }
   const status = Number.isInteger(error.status) && error.status >= 400 && error.status < 500
     ? error.status
     : 500;
@@ -322,6 +331,7 @@ async function startServer() {
 
   await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
   console.log('MongoDB connected.');
+  await ensureConnectApplicationIndexes();
   await ensureDefaultAdminUser();
   startCoreSavingsScheduler();
   return app.listen(PORT, () => {

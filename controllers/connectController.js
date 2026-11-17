@@ -108,6 +108,10 @@ function applicationToClient(application) {
   return {
     id: application._id,
     type: application.type,
+    opportunityId: application.opportunityId || null,
+    opportunityTitle: application.opportunityId && application.opportunityId.title
+      ? application.opportunityId.title
+      : '',
     status: application.status,
     roleInterest: application.roleInterest,
     assignedRole: application.assignedRole,
@@ -118,12 +122,21 @@ function applicationToClient(application) {
     interviewAt: application.interviewAt,
     createdAt: application.createdAt,
     updatedAt: application.updatedAt,
+    documents: (application.documents || []).map((document) => ({
+      id: document._id,
+      name: document.name,
+      format: document.format,
+      bytes: document.bytes,
+    })),
   };
 }
 
 const getMyConnectSummary = asyncHandler(async (req, res) => {
   const [applications, partner, associate, policy] = await Promise.all([
-    ConnectApplication.find({ userId: req.user._id }).sort({ createdAt: -1 }).lean(),
+    ConnectApplication.find({ userId: req.user._id })
+      .populate('opportunityId', 'title')
+      .sort({ createdAt: -1 })
+      .lean(),
     buildPartnerSummary(req.user._id),
     ConnectAssociate.findOne({ userId: req.user._id, status: 'active' }).select('assignedRole').lean(),
     getPolicy(),
@@ -149,6 +162,9 @@ const createApplication = asyncHandler(async (req, res) => {
     || !Array.isArray(promotionChannels)
     || promotionChannels.some((channel) => !PROMOTION_CHANNELS.includes(channel))) {
     return res.status(400).json({ message: 'Please check the application details and try again.' });
+  }
+  if (type === 'applicant') {
+    return res.status(400).json({ message: 'Choose an open role from the Opportunities feed to apply.' });
   }
   if (type === 'applicant' && !APPLICATION_ROLES.includes(roleInterest)) {
     return res.status(400).json({ message: 'Choose a valid opportunity for your application.' });
@@ -329,13 +345,27 @@ const listAdminApplications = asyncHandler(async (req, res) => {
   const [applications, total] = await Promise.all([
     ConnectApplication.find(filter)
       .populate('userId', 'name email phone')
+      .populate('opportunityId', 'title type')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean(),
     ConnectApplication.countDocuments(filter),
   ]);
-  return res.json({ applications, page, limit, total });
+  return res.json({
+    applications: applications.map((application) => ({
+      ...application,
+      documents: (application.documents || []).map((document) => ({
+        _id: document._id,
+        name: document.name,
+        format: document.format,
+        bytes: document.bytes,
+      })),
+    })),
+    page,
+    limit,
+    total,
+  });
 });
 
 const getAdminOverview = asyncHandler(async (_req, res) => {
@@ -414,10 +444,16 @@ const reviewApplication = asyncHandler(async (req, res) => {
   if (status === 'interview_scheduled' && (!interviewAt || Number.isNaN(Date.parse(interviewAt)))) {
     return res.status(400).json({ message: 'Provide a valid interview date and time.' });
   }
-  const application = await ConnectApplication.findById(req.params.applicationId);
+  const application = await ConnectApplication.findById(req.params.applicationId)
+    .populate('opportunityId', 'title');
   if (!application) return res.status(404).json({ message: 'Application not found.' });
   if (!application.active) return res.status(409).json({ message: 'This application has already been completed.' });
-  if (status === 'approved' && application.type === 'applicant' && !APPLICATION_ROLES.includes(assignedRole)) {
+  const opportunityRole = application.opportunityId && application.type === 'applicant';
+  const finalAssignedRole = opportunityRole ? (assignedRole.trim() || application.roleInterest) : assignedRole;
+  if (status === 'approved' && application.type === 'applicant'
+    && (opportunityRole
+      ? finalAssignedRole !== application.roleInterest
+      : !APPLICATION_ROLES.includes(finalAssignedRole))) {
     return res.status(400).json({ message: 'Assign a valid role before approving an applicant.' });
   }
 
@@ -462,7 +498,7 @@ const reviewApplication = asyncHandler(async (req, res) => {
             status,
             active: !['approved', 'rejected'].includes(status),
             reviewNote: reviewNote.trim(),
-            assignedRole: status === 'approved' && application.type === 'applicant' ? assignedRole : '',
+            assignedRole: status === 'approved' && application.type === 'applicant' ? finalAssignedRole : '',
             interviewAt: status === 'interview_scheduled' ? new Date(interviewAt) : null,
             reviewedBy: req.user._id,
             reviewedAt: new Date(),
@@ -481,7 +517,7 @@ const reviewApplication = asyncHandler(async (req, res) => {
       await Notification.create([{
         userId: application.userId,
         title: 'Your Kalma Connect application was updated',
-        message: `Your ${application.type === 'partner' ? 'Connect Partner' : 'talent'} application is now ${status.replaceAll('_', ' ')}.${reviewedApplication.reviewNote ? ` ${reviewedApplication.reviewNote}` : ''}`,
+        message: `Your ${application.opportunityId?.title ? `${application.opportunityId.title} ` : ''}${application.type === 'partner' ? 'Connect Partner' : 'talent'} application is now ${status.replaceAll('_', ' ')}.${reviewedApplication.reviewNote ? ` ${reviewedApplication.reviewNote}` : ''}`.slice(0, 500),
         category: 'System',
         type: status === 'approved' ? 'success' : status === 'rejected' ? 'warning' : 'info',
         icon: 'briefcase',

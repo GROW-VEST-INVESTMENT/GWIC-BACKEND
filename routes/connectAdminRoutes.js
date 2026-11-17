@@ -16,6 +16,7 @@ const {
   getAdminOverview,
   listAdminAudit,
 } = require('../controllers/connectController');
+const opportunityController = require('../controllers/connectOpportunityController');
 
 const router = express.Router();
 const requireAdminOrigin = requireConnectOrigin([
@@ -30,6 +31,10 @@ router.get('/summary', getAdminOverview);
 router.get('/audit', listAdminAudit);
 router.get('/applications', listAdminApplications);
 router.patch('/applications/:applicationId', requireAdminOrigin, reviewApplication);
+router.get('/applications/:applicationId/documents/:documentId', opportunityController.getAdminApplicationDocument);
+router.get('/opportunities', opportunityController.listAdminOpportunities);
+router.post('/opportunities', requireAdminOrigin, opportunityController.createOpportunity);
+router.patch('/opportunities/:opportunityId', requireAdminOrigin, opportunityController.updateOpportunity);
 router.get('/partners', listAdminPartners);
 router.patch('/partners/:partnerId', requireAdminOrigin, updatePartnerStatus);
 router.get('/commissions', listAdminCommissions);
