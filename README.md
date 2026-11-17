@@ -51,6 +51,14 @@ The authenticated `/api/account` routes power the More page:
 
 The legacy `/api/account-review` routes use `ACCOUNT_REVIEW_TOKEN` for trusted server-side tools. Never expose that token in browser code. The admin dashboard instead uses authenticated, role-protected routes under `/api/admin`.
 
+## Kalma Connect partner rewards
+
+Approved Connect partners receive a unique promo code to share. Customers enter it during Kalma Capital web or mobile signup (or follow the partner's `?ref=CODE` signup link); the backend validates the active partner and records the referral in the same transaction as account creation. Connect applicant/partner onboarding does not accept or attach referral codes.
+
+The configurable reward schedule is capped at ₦400 per referral: ₦40 for signup, ₦60 for KYC approval, ₦200 for the first successful wallet deposit after KYC and within 60 days of signup, and ₦100 after two successful wallet deposits on separate UTC dates after KYC and within that same 60-day signup window. Deposits must be settled successfully; refunded or reversed deposits invalidate pending deposit rewards. The active-saver milestone currently measures wallet deposit activity, not recurring savings-plan contributions.
+
+Every commission remains pending until administrator review. Payouts are manual; the system does not initiate transfers. Rewards are disabled by default and cannot be enabled unless `CONNECT_COMMISSION_POLICY_APPROVED=true` is set by the service operator after formal compliance approval. Keep the environment gate false until that approval and rollout are explicitly authorized.
+
 ## Admin dashboard
 
 The admin app uses this backend's HttpOnly session cookie and requires an `admin` or `super_admin` role. Configure `ADMIN_EMAIL`, `ADMIN_NAME`, and `ADMIN_PASSWORD` only in the backend deployment environment. At startup, the backend creates the configured admin or synchronizes the matching account as a `super_admin`; changing `ADMIN_PASSWORD` also changes the account password on the next restart. Use a unique password of at least 12 characters and rotate any password shared in chat.

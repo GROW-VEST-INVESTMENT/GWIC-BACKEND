@@ -8,7 +8,6 @@ const {
   getMyConnectSummary,
   createApplication,
   listMyReferrals,
-  claimReferralCode,
   listMyCommissions,
   listMyPayouts,
   createPayoutRequest,
@@ -41,7 +40,6 @@ router.get('/referrals', listMyReferrals);
 router.get('/commissions', listMyCommissions);
 router.get('/payouts', listMyPayouts);
 router.post('/applications', requireAppOrigin, createApplication);
-router.post('/referrals/claim', requireAppOrigin, claimReferralCode);
 router.post('/payouts', requireAppOrigin, createPayoutRequest);
 
 module.exports = router;

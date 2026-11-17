@@ -10,6 +10,10 @@ const { paystackRequest, verifyWebhookSignature } = require('../services/paystac
 const { createJournal } = require('../services/coreSavings');
 const { getOrCreateWallet } = require('../services/wallet');
 const {
+  awardVerifiedReferralMilestones,
+  rejectPendingCommissionsForReversedDeposit,
+} = require('../services/connectCommissions');
+const {
   getLimitViolation,
   getTierLevel,
   getTierPolicy,
@@ -84,6 +88,7 @@ async function creditVerifiedDeposit(transaction) {
       current.status = 'successful';
       if (releaseReview) current.reviewDecision = 'release';
       await current.save({ session });
+      await awardVerifiedReferralMilestones(current.userId, session);
     });
   } finally {
     await session.endSession();
@@ -731,11 +736,13 @@ async function reviewDeposit(req, res, next) {
             ],
           });
           current.status = 'successful';
+          current.tierUsageAt = current.tierUsageAt || new Date();
           current.reviewDecision = 'release';
           current.reviewedBy = req.user._id;
           current.reviewedAt = new Date();
           current.reviewReason = reason;
           await current.save({ session });
+          await awardVerifiedReferralMilestones(current.userId, session);
           await new AdminAuditLog({
             actorId: req.user._id,
             action: 'transaction.deposit_reviewed',
@@ -809,6 +816,9 @@ async function reviewDeposit(req, res, next) {
           },
         },
       );
+      if (status === 'processed') {
+        await rejectPendingCommissionsForReversedDeposit(transaction._id);
+      }
       return res.status(202).json({
         message: status === 'processed'
           ? 'Refund confirmed by the payment provider.'
@@ -884,6 +894,9 @@ async function handlePaystackWebhook(req, res) {
             },
           },
         );
+        if (processed) {
+          await rejectPendingCommissionsForReversedDeposit(transaction._id);
+        }
       }
     }
     if (

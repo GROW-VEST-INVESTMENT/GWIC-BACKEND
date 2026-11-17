@@ -13,6 +13,12 @@ const ConnectReferral = require('../models/ConnectReferral');
 const LinkedBankAccount = require('../models/LinkedBankAccount');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
+const WalletTransaction = require('../models/WalletTransaction');
+const {
+  MAX_REFERRAL_REWARD_NAIRA,
+  isValidRewardSchedule,
+  releaseCommissionReservation,
+} = require('../services/connectCommissions');
 
 const APPLICATION_TYPES = ['applicant', 'partner'];
 const APPLICATION_STATUSES = ['pending', 'in_review', 'interview_scheduled', 'approved', 'rejected'];
@@ -149,6 +155,15 @@ const getMyConnectSummary = asyncHandler(async (req, res) => {
     partner,
     associate,
     minimumPayoutNaira: policy.minimumPayoutNaira,
+    commissionPolicy: {
+      rewardsEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true'
+        && policy.milestoneRewardsEnabled,
+      maxPerReferralNaira: MAX_REFERRAL_REWARD_NAIRA,
+      registrationRewardNaira: policy.registrationRewardNaira,
+      kycRewardNaira: policy.kycRewardNaira,
+      firstDepositRewardNaira: policy.firstDepositRewardNaira,
+      activeSaverBonusNaira: policy.activeSaverBonusNaira,
+    },
   });
 });
 
@@ -220,32 +235,6 @@ const listMyReferrals = asyncHandler(async (req, res) => {
     ConnectReferral.countDocuments({ partnerId: partner._id }),
   ]);
   return res.json({ referrals, page, limit, total });
-});
-
-const claimReferralCode = asyncHandler(async (req, res) => {
-  const promoCode = typeof req.body?.promoCode === 'string'
-    ? req.body.promoCode.trim().toUpperCase()
-    : '';
-  if (!/^[A-Z0-9-]{4,24}$/.test(promoCode)) {
-    return res.status(400).json({ message: 'Enter a valid partner promo code.' });
-  }
-  const partner = await ConnectPartner.findOne({ promoCode, status: 'active' });
-  if (!partner) return res.status(404).json({ message: 'That promo code is unavailable.' });
-  if (String(partner.userId) === String(req.user._id)) {
-    return res.status(400).json({ message: 'You cannot use your own promo code.' });
-  }
-  try {
-    await ConnectReferral.create({
-      partnerId: partner._id,
-      referredUserId: req.user._id,
-    });
-    return res.status(201).json({ message: 'Promo code linked. Registration rewards are only generated when a code is used during account creation.' });
-  } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({ message: 'A promo code has already been linked to this account.' });
-    }
-    throw error;
-  }
 });
 
 const listMyCommissions = asyncHandler(async (req, res) => {
@@ -608,7 +597,11 @@ const listAdminCommissions = asyncHandler(async (req, res) => {
   const [commissions, total] = await Promise.all([
     ConnectCommission.find(filter)
       .populate({ path: 'partnerId', select: 'promoCode userId', populate: { path: 'userId', select: 'name email' } })
-      .populate({ path: 'referralId', select: 'registeredAt' })
+      .populate({
+        path: 'referralId',
+        select: 'registeredAt referredUserId',
+        populate: { path: 'referredUserId', select: 'name email' },
+      })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -635,6 +628,17 @@ const reviewCommission = asyncHandler(async (req, res) => {
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
+      if (status === 'approved' && ['first_deposit', 'active_saver'].includes(commission.type)) {
+        const sourceIds = commission.sourceTransactionIds || [];
+        const successfulSources = await WalletTransaction.countDocuments({
+          _id: { $in: sourceIds },
+          type: 'deposit',
+          status: 'successful',
+        }).session(session);
+        if (!sourceIds.length || successfulSources !== sourceIds.length) {
+          throw messageError(409, 'A qualifying deposit has been refunded or reversed, so this commission cannot be approved.');
+        }
+      }
       const updated = await ConnectCommission.findOneAndUpdate(
         { _id: commission._id, status: 'pending' },
         {
@@ -649,6 +653,9 @@ const reviewCommission = asyncHandler(async (req, res) => {
       );
       if (!updated) throw messageError(409, 'This commission was already reviewed.');
       Object.assign(commission, updated.toObject());
+      if (status === 'rejected') {
+        await releaseCommissionReservation(commission, session);
+      }
       await ConnectAdminAudit.create([{
         actorId: req.user._id,
         action: 'commission_reviewed',
@@ -659,7 +666,7 @@ const reviewCommission = asyncHandler(async (req, res) => {
       await Notification.create([{
         userId: partner.userId,
         title: 'Your Connect earnings were reviewed',
-        message: `A registration commission was ${status}.${commission.reviewNote ? ` ${commission.reviewNote}` : ''}`,
+        message: `Your ${commission.type.replaceAll('_', ' ')} commission was ${status}.${commission.reviewNote ? ` ${commission.reviewNote}` : ''}`,
         category: 'System',
         type: status === 'approved' ? 'success' : 'warning',
         icon: 'wallet',
@@ -766,33 +773,50 @@ const getAdminPolicy = asyncHandler(async (_req, res) => {
   return res.json({
     policy: {
       registrationRewardNaira: policy.registrationRewardNaira,
-      registrationRewardEnabled: policy.registrationRewardEnabled,
+      kycRewardNaira: policy.kycRewardNaira,
+      firstDepositRewardNaira: policy.firstDepositRewardNaira,
+      activeSaverBonusNaira: policy.activeSaverBonusNaira,
+      milestoneRewardsEnabled: policy.milestoneRewardsEnabled,
       minimumPayoutNaira: policy.minimumPayoutNaira,
       rewardsMayBeEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true',
+      maxPerReferralNaira: MAX_REFERRAL_REWARD_NAIRA,
     },
   });
 });
 
 const updateAdminPolicy = asyncHandler(async (req, res) => {
-  const { registrationRewardNaira, registrationRewardEnabled, minimumPayoutNaira } = req.body || {};
-  if (!Number.isSafeInteger(registrationRewardNaira)
-    || registrationRewardNaira < 0
-    || registrationRewardNaira > 100_000_000
+  const {
+    registrationRewardNaira,
+    kycRewardNaira,
+    firstDepositRewardNaira,
+    activeSaverBonusNaira,
+    milestoneRewardsEnabled,
+    minimumPayoutNaira,
+  } = req.body || {};
+  const rewardSchedule = {
+    registrationRewardNaira,
+    kycRewardNaira,
+    firstDepositRewardNaira,
+    activeSaverBonusNaira,
+  };
+  if (!isValidRewardSchedule(rewardSchedule)
     || !Number.isSafeInteger(minimumPayoutNaira)
     || minimumPayoutNaira < 1
     || minimumPayoutNaira > 10_000_000
-    || typeof registrationRewardEnabled !== 'boolean') {
-    return res.status(400).json({ message: 'Enter valid whole-naira reward and withdrawal policy values.' });
+    || typeof milestoneRewardsEnabled !== 'boolean') {
+    return res.status(400).json({
+      message: `Enter valid whole-naira amounts. The total reward schedule cannot exceed ₦${MAX_REFERRAL_REWARD_NAIRA} per referral.`,
+    });
   }
-  if (registrationRewardEnabled && process.env.CONNECT_COMMISSION_POLICY_APPROVED !== 'true') {
+  if (milestoneRewardsEnabled && process.env.CONNECT_COMMISSION_POLICY_APPROVED !== 'true') {
     return res.status(403).json({ message: 'Commission rewards cannot be enabled until the policy is approved and configured by the service operator.' });
   }
   const policy = await ConnectPolicy.findOneAndUpdate(
     { key: 'default' },
     {
       $set: {
-        registrationRewardNaira,
-        registrationRewardEnabled,
+        ...rewardSchedule,
+        milestoneRewardsEnabled,
         minimumPayoutNaira,
         updatedBy: req.user._id,
       },
@@ -805,14 +829,18 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
     action: 'policy_updated',
     entityType: 'policy',
     entityId: policy._id,
-    details: { registrationRewardNaira, registrationRewardEnabled, minimumPayoutNaira },
+    details: { ...rewardSchedule, milestoneRewardsEnabled, minimumPayoutNaira },
   });
   return res.json({
     policy: {
       registrationRewardNaira: policy.registrationRewardNaira,
-      registrationRewardEnabled: policy.registrationRewardEnabled,
+      kycRewardNaira: policy.kycRewardNaira,
+      firstDepositRewardNaira: policy.firstDepositRewardNaira,
+      activeSaverBonusNaira: policy.activeSaverBonusNaira,
+      milestoneRewardsEnabled: policy.milestoneRewardsEnabled,
       minimumPayoutNaira: policy.minimumPayoutNaira,
       rewardsMayBeEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true',
+      maxPerReferralNaira: MAX_REFERRAL_REWARD_NAIRA,
     },
   });
 });
@@ -821,7 +849,6 @@ module.exports = {
   getMyConnectSummary,
   createApplication,
   listMyReferrals,
-  claimReferralCode,
   listMyCommissions,
   listMyPayouts,
   createPayoutRequest,

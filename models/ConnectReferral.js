@@ -6,6 +6,7 @@ const connectReferralSchema = new mongoose.Schema(
     referredUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     status: { type: String, enum: ['registered', 'active'], default: 'registered', required: true },
     registeredAt: { type: Date, default: Date.now },
+    commissionReservedKobo: { type: Number, min: 0 },
   },
   { timestamps: true },
 );

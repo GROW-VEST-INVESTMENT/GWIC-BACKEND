@@ -6,9 +6,7 @@ const mongoose = require('mongoose');
 require('dotenv').config();
 
 const User = require('./models/User');
-const ConnectCommission = require('./models/ConnectCommission');
 const ConnectPartner = require('./models/ConnectPartner');
-const ConnectPolicy = require('./models/ConnectPolicy');
 const ConnectReferral = require('./models/ConnectReferral');
 const adminRoutes = require('./routes/adminRoutes');
 const requireAuth = require('./middleware/requireAuth');
@@ -23,6 +21,7 @@ const notificationsRoutes = require('./routes/notificationsRoutes');
 const connectRoutes = require('./routes/connectRoutes');
 const connectAdminRoutes = require('./routes/connectAdminRoutes');
 const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
+const { createRegistrationCommission } = require('./services/connectCommissions');
 const ensureConnectApplicationIndexes = require('./services/connectApplicationIndexes');
 const ensureConnectCommunicationIndexes = require('./services/connectCommunicationIndexes');
 const { handlePaystackWebhook } = require('./controllers/walletController');
@@ -177,19 +176,7 @@ app.post('/api/auth/register', async (req, res, next) => {
             partnerId: partner._id,
             referredUserId: user._id,
           }], { session });
-          const policy = await ConnectPolicy.findOne({ key: 'default' }).session(session);
-          if (
-            process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true'
-            && policy?.registrationRewardEnabled
-            && policy.registrationRewardNaira > 0
-          ) {
-            await ConnectCommission.create([{
-              partnerId: partner._id,
-              referralId: referral._id,
-              type: 'registration',
-              amountKobo: policy.registrationRewardNaira * 100,
-            }], { session });
-          }
+          await createRegistrationCommission(referral, session);
         });
       } finally {
         await session.endSession();

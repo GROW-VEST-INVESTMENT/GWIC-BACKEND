@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
 const SupportRequest = require('../models/SupportRequest');
+const { awardVerifiedReferralMilestones } = require('../services/connectCommissions');
 
 const REVIEW_STATUSES = ['pending', 'verified', 'rejected'];
 const SUPPORT_STATUSES = ['open', 'in_progress', 'resolved'];
@@ -69,6 +70,9 @@ async function reviewVerification(req, res, next) {
       user.isKycVerified = decision === 'verified';
       await request.save({ session });
       await user.save({ session });
+      if (decision === 'verified') {
+        await awardVerifiedReferralMilestones(user._id, session);
+      }
       reviewed = { id: request.id, status: request.status, reviewedAt: request.reviewedAt };
     });
     return res.json({ message: 'Verification review saved.', request: reviewed });

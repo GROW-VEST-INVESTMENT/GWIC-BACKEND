@@ -8,6 +8,7 @@ const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
 const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
+const { awardVerifiedReferralMilestones } = require('../services/connectCommissions');
 const {
   DEFAULT_TIERS,
   getTierLevel,
@@ -688,7 +689,10 @@ async function reviewVerification(req, res, next) {
       request.reviewedAt = new Date();
       request.reviewerNote = normalizedNote;
       await request.save({ session });
-      if (decision === 'verified') await user.save({ session });
+      if (decision === 'verified') {
+        await user.save({ session });
+        await awardVerifiedReferralMilestones(user._id, session);
+      }
       await new AdminAuditLog({
         actorId: req.user.id,
         action: 'kyc.reviewed',

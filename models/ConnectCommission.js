@@ -4,8 +4,9 @@ const connectCommissionSchema = new mongoose.Schema(
   {
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConnectPartner', required: true, index: true },
     referralId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConnectReferral', required: true },
-    type: { type: String, enum: ['registration'], required: true },
+    type: { type: String, enum: ['registration', 'kyc_verification', 'first_deposit', 'active_saver'], required: true },
     amountKobo: { type: Number, required: true, min: 1 },
+    sourceTransactionIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'WalletTransaction' }],
     status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending', required: true },
     reviewNote: { type: String, trim: true, maxlength: 500, default: '' },
     reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },

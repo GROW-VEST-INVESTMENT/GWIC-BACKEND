@@ -4,6 +4,8 @@ const mongoose = require('mongoose');
 const requireAdmin = require('../middleware/requireAdmin');
 const requireAdminOrigin = require('../middleware/requireAdminOrigin');
 const AdminAuditLog = require('../models/AdminAuditLog');
+const ConnectPolicy = require('../models/ConnectPolicy');
+const ConnectReferral = require('../models/ConnectReferral');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
@@ -453,6 +455,8 @@ test('legacy pending verification requests are reviewed as Tier 1', async () => 
   const originalStartSession = mongoose.startSession;
   const originalFindOne = VerificationRequest.findOne;
   const originalFindById = User.findById;
+  const originalReferralFindOne = ConnectReferral.findOne;
+  const originalPolicyFindOneAndUpdate = ConnectPolicy.findOneAndUpdate;
   const originalAuditSave = AdminAuditLog.prototype.save;
   const request = {
     id: '507f1f77bcf86cd799439011',
@@ -462,12 +466,27 @@ test('legacy pending verification requests are reviewed as Tier 1', async () => 
     save: async () => {},
   };
   const user = { transactionTier: 0, isKycVerified: false, save: async () => {} };
+  const resolvedQuery = (result) => ({
+    session() { return this; },
+    select() { return this; },
+    sort() { return this; },
+    then(resolve, reject) { return Promise.resolve(result).then(resolve, reject); },
+  });
   mongoose.startSession = async () => ({
     withTransaction: async (callback) => callback(),
     endSession: async () => {},
   });
-  VerificationRequest.findOne = () => ({ session: async () => request });
-  User.findById = () => ({ session: async () => user });
+  VerificationRequest.findOne = (filter) => (
+    filter.status === 'pending'
+      ? { session: async () => request }
+      : resolvedQuery(null)
+  );
+  User.findById = () => ({
+    session: async () => user,
+    select() { return this; },
+  });
+  ConnectReferral.findOne = () => resolvedQuery(null);
+  ConnectPolicy.findOneAndUpdate = () => resolvedQuery(null);
   AdminAuditLog.prototype.save = async () => {};
   try {
     const response = makeResponse();
@@ -496,6 +515,8 @@ test('legacy pending verification requests are reviewed as Tier 1', async () => 
     mongoose.startSession = originalStartSession;
     VerificationRequest.findOne = originalFindOne;
     User.findById = originalFindById;
+    ConnectReferral.findOne = originalReferralFindOne;
+    ConnectPolicy.findOneAndUpdate = originalPolicyFindOneAndUpdate;
     AdminAuditLog.prototype.save = originalAuditSave;
   }
 });
