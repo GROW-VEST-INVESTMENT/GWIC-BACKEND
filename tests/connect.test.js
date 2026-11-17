@@ -233,6 +233,18 @@ test('staff replies persist a private message, notify the applicant, and audit t
   }
 });
 
+test('Connect audit schema accepts the staff application-message action', async () => {
+  const audit = new ConnectAdminAudit({
+    actorId: '507f1f77bcf86cd799439013',
+    action: 'application_message_sent',
+    entityType: 'application',
+    entityId: '507f1f77bcf86cd799439011',
+    details: { messageId: '507f1f77bcf86cd799439014' },
+  });
+
+  await audit.validate();
+});
+
 test('application documents accept only allowlisted files with matching content and stay under the combined limit', () => {
   const validPdf = {
     originalname: 'cv.pdf',
