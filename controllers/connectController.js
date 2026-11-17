@@ -15,6 +15,13 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const WalletTransaction = require('../models/WalletTransaction');
 const { paystackRequest } = require('../services/paystack');
+const { normalizeAccountName } = require('./walletController');
+const {
+  PAYOUT_TIMEZONE,
+  PAYOUT_TIMEZONE_LABEL,
+  isPayoutDay,
+  payoutDayNames,
+} = require('../services/connectPayoutSchedule');
 const {
   MAX_REFERRAL_REWARD_NAIRA,
   isValidRewardSchedule,
@@ -165,6 +172,8 @@ const getMyConnectSummary = asyncHandler(async (req, res) => {
     partner,
     associate,
     minimumPayoutNaira: policy.minimumPayoutNaira,
+    payoutDays: policy.payoutDays,
+    payoutTimezone: PAYOUT_TIMEZONE_LABEL,
     commissionPolicy: {
       rewardsEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true'
         && policy.milestoneRewardsEnabled,
@@ -788,12 +797,29 @@ const reviewPayout = asyncHandler(async (req, res) => {
     if (payout.status !== 'pending') {
       return res.status(409).json({ message: `A ${payout.status} withdrawal cannot be approved and paid again.` });
     }
+    const policy = await getPolicy();
+    if (!isPayoutDay(policy.payoutDays)) {
+      const days = payoutDayNames(policy.payoutDays).join(', ');
+      return res.status(409).json({
+        message: `Connect withdrawals can only be approved and paid on ${days} (${PAYOUT_TIMEZONE} time). This request remains pending.`,
+      });
+    }
     const bank = await LinkedBankAccount.findOne({
       _id: payout.linkedBankId,
       userId: payout.userId,
-    }).select('+recipientCode');
+    }).select('+recipientCode accountName');
     if (!bank?.recipientCode) {
       return res.status(409).json({ message: "The partner's linked Paystack bank recipient is unavailable. Ask them to relink their bank account." });
+    }
+    const user = await User.findById(payout.userId).select('name');
+    if (
+      !user?.name
+      || !bank.accountName
+      || normalizeAccountName(bank.accountName) !== normalizeAccountName(user.name)
+    ) {
+      return res.status(409).json({
+        message: "The Paystack account holder name does not match the partner's Kalma Connect legal name. Ask the partner to link a matching bank account.",
+      });
     }
 
     const transferReference = payout.transferReference || `KALMA_CONNECT_${crypto.randomUUID()}`;
@@ -1033,6 +1059,8 @@ const getAdminPolicy = asyncHandler(async (_req, res) => {
       activeSaverBonusNaira: policy.activeSaverBonusNaira,
       milestoneRewardsEnabled: policy.milestoneRewardsEnabled,
       minimumPayoutNaira: policy.minimumPayoutNaira,
+      payoutDays: policy.payoutDays,
+      payoutTimezone: PAYOUT_TIMEZONE_LABEL,
       rewardsMayBeEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true',
       maxPerReferralNaira: MAX_REFERRAL_REWARD_NAIRA,
     },
@@ -1047,6 +1075,7 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
     activeSaverBonusNaira,
     milestoneRewardsEnabled,
     minimumPayoutNaira,
+    payoutDays,
   } = req.body || {};
   const rewardSchedule = {
     registrationRewardNaira,
@@ -1058,9 +1087,13 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
     || !Number.isSafeInteger(minimumPayoutNaira)
     || minimumPayoutNaira < 1
     || minimumPayoutNaira > 10_000_000
+    || !Array.isArray(payoutDays)
+    || payoutDays.length < 1
+    || payoutDays.some((day) => !Number.isInteger(day) || day < 0 || day > 6)
+    || new Set(payoutDays).size !== payoutDays.length
     || typeof milestoneRewardsEnabled !== 'boolean') {
     return res.status(400).json({
-      message: `Enter valid whole-naira amounts. The total reward schedule cannot exceed ₦${MAX_REFERRAL_REWARD_NAIRA} per referral.`,
+      message: `Enter valid whole-naira amounts and select at least one unique payout weekday. The total reward schedule cannot exceed ₦${MAX_REFERRAL_REWARD_NAIRA} per referral.`,
     });
   }
   if (milestoneRewardsEnabled && process.env.CONNECT_COMMISSION_POLICY_APPROVED !== 'true') {
@@ -1073,6 +1106,7 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
         ...rewardSchedule,
         milestoneRewardsEnabled,
         minimumPayoutNaira,
+        payoutDays,
         updatedBy: req.user._id,
       },
       $setOnInsert: { key: 'default' },
@@ -1084,7 +1118,7 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
     action: 'policy_updated',
     entityType: 'policy',
     entityId: policy._id,
-    details: { ...rewardSchedule, milestoneRewardsEnabled, minimumPayoutNaira },
+    details: { ...rewardSchedule, milestoneRewardsEnabled, minimumPayoutNaira, payoutDays },
   });
   return res.json({
     policy: {
@@ -1094,6 +1128,8 @@ const updateAdminPolicy = asyncHandler(async (req, res) => {
       activeSaverBonusNaira: policy.activeSaverBonusNaira,
       milestoneRewardsEnabled: policy.milestoneRewardsEnabled,
       minimumPayoutNaira: policy.minimumPayoutNaira,
+      payoutDays: policy.payoutDays,
+      payoutTimezone: PAYOUT_TIMEZONE_LABEL,
       rewardsMayBeEnabled: process.env.CONNECT_COMMISSION_POLICY_APPROVED === 'true',
       maxPerReferralNaira: MAX_REFERRAL_REWARD_NAIRA,
     },

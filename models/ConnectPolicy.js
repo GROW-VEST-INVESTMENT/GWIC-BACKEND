@@ -9,6 +9,16 @@ const connectPolicySchema = new mongoose.Schema(
     activeSaverBonusNaira: { type: Number, default: 100, min: 0 },
     milestoneRewardsEnabled: { type: Boolean, default: false },
     minimumPayoutNaira: { type: Number, default: 1000, min: 1 },
+    payoutDays: {
+      type: [{ type: Number, min: 0, max: 6 }],
+      default: [1],
+      validate: {
+        validator: (days) => Array.isArray(days)
+          && days.length > 0
+          && new Set(days).size === days.length,
+        message: 'Select at least one unique payout weekday.',
+      },
+    },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   },
   { timestamps: true },

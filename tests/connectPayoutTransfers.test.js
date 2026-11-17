@@ -3,8 +3,11 @@ const { after, test } = require('node:test');
 const mongoose = require('mongoose');
 const ConnectAdminAudit = require('../models/ConnectAdminAudit');
 const ConnectPayout = require('../models/ConnectPayout');
+const ConnectPolicy = require('../models/ConnectPolicy');
 const LinkedBankAccount = require('../models/LinkedBankAccount');
 const Notification = require('../models/Notification');
+const User = require('../models/User');
+const { getWeekdayInPayoutTimezone } = require('../services/connectPayoutSchedule');
 const {
   handleConnectPayoutWebhook,
   providerStatusToPayoutStatus,
@@ -164,7 +167,9 @@ test('admin approval creates one Paystack transfer and reserves the payout befor
     [ConnectPayout, 'findById'],
     [ConnectPayout, 'findOneAndUpdate'],
     [ConnectPayout, 'updateOne'],
+    [ConnectPolicy, 'findOneAndUpdate'],
     [LinkedBankAccount, 'findOne'],
+    [User, 'findById'],
     [ConnectAdminAudit, 'create'],
     [Notification, 'create'],
   ];
@@ -192,9 +197,11 @@ test('admin approval creates one Paystack transfer and reserves the payout befor
     Object.assign(payout, changes.$set);
     return { matchedCount: 1 };
   };
+  ConnectPolicy.findOneAndUpdate = async () => ({ payoutDays: [0, 1, 2, 3, 4, 5, 6] });
   LinkedBankAccount.findOne = () => ({
-    select: async () => ({ recipientCode: 'RCP_connect-recipient' }),
+    select: async () => ({ recipientCode: 'RCP_connect-recipient', accountName: 'Test Partner' }),
   });
+  User.findById = () => ({ select: async () => ({ name: 'Test Partner' }) });
   ConnectAdminAudit.create = async () => {};
   Notification.create = async () => {};
   global.fetch = async (url, options) => {
@@ -234,7 +241,9 @@ test('an OTP-required Paystack transfer remains reserved for admin confirmation'
     [ConnectPayout, 'findById'],
     [ConnectPayout, 'findOneAndUpdate'],
     [ConnectPayout, 'updateOne'],
+    [ConnectPolicy, 'findOneAndUpdate'],
     [LinkedBankAccount, 'findOne'],
+    [User, 'findById'],
     [ConnectAdminAudit, 'create'],
     [Notification, 'create'],
   ];
@@ -260,9 +269,11 @@ test('an OTP-required Paystack transfer remains reserved for admin confirmation'
     Object.assign(payout, changes.$set);
     return { matchedCount: 1 };
   };
+  ConnectPolicy.findOneAndUpdate = async () => ({ payoutDays: [0, 1, 2, 3, 4, 5, 6] });
   LinkedBankAccount.findOne = () => ({
-    select: async () => ({ recipientCode: 'RCP_connect-recipient' }),
+    select: async () => ({ recipientCode: 'RCP_connect-recipient', accountName: 'Test Partner' }),
   });
+  User.findById = () => ({ select: async () => ({ name: 'Test Partner' }) });
   ConnectAdminAudit.create = async () => {};
   Notification.create = async () => {};
   global.fetch = async () => new Response(JSON.stringify({
@@ -284,6 +295,84 @@ test('an OTP-required Paystack transfer remains reserved for admin confirmation'
   assert.equal(response.body.payout.status, 'requires_otp');
   assert.equal(payout.status, 'requires_otp');
   assert.equal(payout.transferCode, 'TRF_connect-5');
+});
+
+test('admin cannot initiate a Connect payout outside the configured payout weekdays', async () => {
+  const connectController = require('../controllers/connectController');
+  const originals = [
+    [ConnectPayout, 'findById'],
+    [ConnectPolicy, 'findOneAndUpdate'],
+    [LinkedBankAccount, 'findOne'],
+  ];
+  const saved = originals.map(([target, key]) => target[key]);
+  const payout = { _id: 'payout-off-day', status: 'pending' };
+  const today = getWeekdayInPayoutTimezone();
+  let bankLookups = 0;
+  let transferCalls = 0;
+  ConnectPayout.findById = async () => payout;
+  ConnectPolicy.findOneAndUpdate = async () => ({
+    payoutDays: [0, 1, 2, 3, 4, 5, 6].filter((day) => day !== today),
+  });
+  LinkedBankAccount.findOne = () => { bankLookups += 1; };
+  const originalFetch = global.fetch;
+  global.fetch = async () => { transferCalls += 1; };
+  const response = makeResponse();
+  try {
+    await connectController.reviewPayout({
+      params: { payoutId: payout._id },
+      body: { status: 'approved' },
+      user: { _id: 'admin-1' },
+    }, response, (error) => { throw error; });
+  } finally {
+    global.fetch = originalFetch;
+    originals.forEach(([target, key], index) => { target[key] = saved[index]; });
+  }
+
+  assert.equal(response.statusCode, 409);
+  assert.match(response.body.message, /only be approved and paid on/i);
+  assert.equal(payout.status, 'pending');
+  assert.equal(bankLookups, 0);
+  assert.equal(transferCalls, 0);
+});
+
+test('admin cannot pay a Connect withdrawal to a bank name that does not match the legal profile name', async () => {
+  const connectController = require('../controllers/connectController');
+  const originals = [
+    [ConnectPayout, 'findById'],
+    [ConnectPolicy, 'findOneAndUpdate'],
+    [LinkedBankAccount, 'findOne'],
+    [User, 'findById'],
+  ];
+  const saved = originals.map(([target, key]) => target[key]);
+  const originalFetch = global.fetch;
+  let transferCalls = 0;
+  ConnectPayout.findById = async () => ({
+    _id: 'payout-name-mismatch',
+    status: 'pending',
+    userId: 'partner-name-mismatch',
+    linkedBankId: 'bank-name-mismatch',
+  });
+  ConnectPolicy.findOneAndUpdate = async () => ({ payoutDays: [0, 1, 2, 3, 4, 5, 6] });
+  LinkedBankAccount.findOne = () => ({
+    select: async () => ({ recipientCode: 'RCP_connect-recipient', accountName: 'Different Person' }),
+  });
+  User.findById = () => ({ select: async () => ({ name: 'Kalma Partner' }) });
+  global.fetch = async () => { transferCalls += 1; };
+  const response = makeResponse();
+  try {
+    await connectController.reviewPayout({
+      params: { payoutId: 'payout-name-mismatch' },
+      body: { status: 'approved' },
+      user: { _id: 'admin-1' },
+    }, response, (error) => { throw error; });
+  } finally {
+    global.fetch = originalFetch;
+    originals.forEach(([target, key], index) => { target[key] = saved[index]; });
+  }
+
+  assert.equal(response.statusCode, 409);
+  assert.match(response.body.message, /account holder name does not match/i);
+  assert.equal(transferCalls, 0);
 });
 
 test('a Paystack OTP is sent to the provider and never persisted on the payout', async () => {
