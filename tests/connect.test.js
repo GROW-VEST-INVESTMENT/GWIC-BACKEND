@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
+const mongoose = require('mongoose');
 const requireConnectAdmin = require('../middleware/requireConnectAdmin');
 const requireConnectOrigin = require('../middleware/requireConnectOrigin');
 const ConnectOpportunity = require('../models/ConnectOpportunity');
@@ -10,7 +11,11 @@ const {
 } = require('../services/connectApplicationDocuments');
 const { createApplication } = require('../controllers/connectController');
 const ConnectApplication = require('../models/ConnectApplication');
+const ConnectApplicationMessage = require('../models/ConnectApplicationMessage');
+const ConnectAdminAudit = require('../models/ConnectAdminAudit');
+const Notification = require('../models/Notification');
 const { getMyApplicationDocument } = require('../controllers/connectOpportunityController');
+const communicationController = require('../controllers/connectCommunicationController');
 
 function makeResponse() {
   return {
@@ -24,6 +29,14 @@ function makeResponse() {
       this.body = body;
       return body;
     },
+  };
+}
+
+function queryResult(value) {
+  return {
+    select() { return this; },
+    populate() { return this; },
+    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
   };
 }
 
@@ -64,6 +77,18 @@ test('Connect APIs require an authenticated account and signup rejects malformed
     assert.equal(notificationsResponse.status, 401);
     const opportunitiesResponse = await fetch(`${baseUrl}/api/connect/opportunities`);
     assert.equal(opportunitiesResponse.status, 401);
+    const inboxResponse = await fetch(`${baseUrl}/api/connect/inbox`);
+    assert.equal(inboxResponse.status, 401);
+    const messagesResponse = await fetch(`${baseUrl}/api/connect/applications/507f1f77bcf86cd799439011/messages`);
+    assert.equal(messagesResponse.status, 401);
+    const adminInboxResponse = await fetch(`${baseUrl}/api/admin/connect/inbox`);
+    assert.equal(adminInboxResponse.status, 401);
+    const reactionResponse = await fetch(`${baseUrl}/api/connect/opportunities/507f1f77bcf86cd799439011/reaction`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reaction: 'love' }),
+    });
+    assert.equal(reactionResponse.status, 401);
     const publishResponse = await fetch(`${baseUrl}/api/admin/connect/opportunities`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -88,6 +113,123 @@ test('Connect APIs require an authenticated account and signup rejects malformed
   } finally {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('opportunity reactions reject unknown values before reading an opportunity', async () => {
+  const originalFindOne = ConnectOpportunity.findOne;
+  ConnectOpportunity.findOne = () => { throw new Error('Invalid reaction reached the database'); };
+  const response = makeResponse();
+  try {
+    await communicationController.setOpportunityReaction({
+      params: { opportunityId: '507f1f77bcf86cd799439011' },
+      body: { reaction: 'firestorm' },
+      user: { _id: '507f1f77bcf86cd799439012' },
+    }, response, (error) => { throw error; });
+    assert.equal(response.statusCode, 400);
+    assert.match(response.body.message, /valid reaction/i);
+  } finally {
+    ConnectOpportunity.findOne = originalFindOne;
+  }
+});
+
+test('applicant conversation access is scoped to the authenticated application owner', async () => {
+  const originalFindOne = ConnectApplication.findOne;
+  let filter;
+  ConnectApplication.findOne = (query) => {
+    filter = query;
+    return queryResult(null);
+  };
+  const response = makeResponse();
+  let nextError;
+  try {
+    await communicationController.listApplicantMessages({
+      params: { applicationId: '507f1f77bcf86cd799439011' },
+      user: { _id: '507f1f77bcf86cd799439012', role: 'customer' },
+    }, response, (error) => { nextError = error; });
+    assert.equal(String(filter.userId), '507f1f77bcf86cd799439012');
+    assert.equal(nextError.status, 404);
+    assert.match(nextError.message, /application not found/i);
+  } finally {
+    ConnectApplication.findOne = originalFindOne;
+  }
+});
+
+test('application messages reject empty or oversized content', async () => {
+  const originalFindOne = ConnectApplication.findOne;
+  ConnectApplication.findOne = () => queryResult({
+    _id: '507f1f77bcf86cd799439011',
+    userId: '507f1f77bcf86cd799439012',
+    status: 'pending',
+    type: 'applicant',
+    roleInterest: 'Customer Care Assistant',
+  });
+  try {
+    for (const body of ['   ', 'x'.repeat(2001)]) {
+      const response = makeResponse();
+      await communicationController.sendApplicantMessage({
+        params: { applicationId: '507f1f77bcf86cd799439011' },
+        body: { body },
+        user: { _id: '507f1f77bcf86cd799439012', role: 'customer' },
+      }, response, (error) => { throw error; });
+      assert.equal(response.statusCode, 400);
+      assert.match(response.body.message, /1 to 2000 characters/i);
+    }
+  } finally {
+    ConnectApplication.findOne = originalFindOne;
+  }
+});
+
+test('staff replies persist a private message, notify the applicant, and audit the action', async () => {
+  const methods = [
+    [ConnectApplication, 'findOne'],
+    [ConnectApplication, 'updateOne'],
+    [ConnectApplicationMessage, 'create'],
+    [Notification, 'create'],
+    [ConnectAdminAudit, 'create'],
+    [mongoose, 'startSession'],
+  ];
+  const originals = methods.map(([target, key]) => target[key]);
+  const applicationId = '507f1f77bcf86cd799439011';
+  const applicantId = '507f1f77bcf86cd799439012';
+  const staffId = '507f1f77bcf86cd799439013';
+  const writes = { notifications: [], audit: [] };
+  ConnectApplication.findOne = () => queryResult({
+    _id: applicationId,
+    userId: applicantId,
+    status: 'in_review',
+    type: 'applicant',
+    roleInterest: 'Customer Care Assistant',
+  });
+  ConnectApplication.updateOne = async () => ({ modifiedCount: 1 });
+  ConnectApplicationMessage.create = async (documents) => documents.map((document) => ({
+    _id: '507f1f77bcf86cd799439014',
+    ...document,
+    createdAt: new Date('2026-11-17T00:00:00.000Z'),
+  }));
+  Notification.create = async (documents) => { writes.notifications.push(...documents); return documents; };
+  ConnectAdminAudit.create = async (documents) => { writes.audit.push(...documents); return documents; };
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  const response = makeResponse();
+  try {
+    await communicationController.sendStaffMessage({
+      params: { applicationId },
+      body: { body: 'Please share your availability for an interview next week.' },
+      user: { _id: staffId, role: 'staff' },
+    }, response, (error) => { throw error; });
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.body.message.senderRole, 'staff');
+    assert.equal(response.body.message.body, 'Please share your availability for an interview next week.');
+    assert.equal(writes.notifications.length, 1);
+    assert.equal(String(writes.notifications[0].userId), applicantId);
+    assert.equal(String(writes.notifications[0].connectApplicationId), applicationId);
+    assert.equal(writes.audit.length, 1);
+    assert.equal(writes.audit[0].action, 'application_message_sent');
+  } finally {
+    methods.forEach(([target, key], index) => { target[key] = originals[index]; });
   }
 });
 

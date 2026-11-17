@@ -17,6 +17,7 @@ const {
   listAdminAudit,
 } = require('../controllers/connectController');
 const opportunityController = require('../controllers/connectOpportunityController');
+const communicationController = require('../controllers/connectCommunicationController');
 
 const router = express.Router();
 const requireAdminOrigin = requireConnectOrigin([
@@ -32,6 +33,9 @@ router.get('/audit', listAdminAudit);
 router.get('/applications', listAdminApplications);
 router.patch('/applications/:applicationId', requireAdminOrigin, reviewApplication);
 router.get('/applications/:applicationId/documents/:documentId', opportunityController.getAdminApplicationDocument);
+router.get('/inbox', communicationController.listStaffInbox);
+router.get('/applications/:applicationId/messages', communicationController.listStaffMessages);
+router.post('/applications/:applicationId/messages', requireAdminOrigin, communicationController.sendStaffMessage);
 router.get('/opportunities', opportunityController.listAdminOpportunities);
 router.post('/opportunities', requireAdminOrigin, opportunityController.createOpportunity);
 router.patch('/opportunities/:opportunityId', requireAdminOrigin, opportunityController.updateOpportunity);

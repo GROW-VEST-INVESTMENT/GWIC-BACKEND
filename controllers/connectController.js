@@ -2,9 +2,11 @@ const crypto = require('node:crypto');
 const mongoose = require('mongoose');
 const ConnectAdminAudit = require('../models/ConnectAdminAudit');
 const ConnectApplication = require('../models/ConnectApplication');
+const ConnectApplicationMessage = require('../models/ConnectApplicationMessage');
 const ConnectAssociate = require('../models/ConnectAssociate');
 const ConnectCommission = require('../models/ConnectCommission');
 const ConnectPartner = require('../models/ConnectPartner');
+const ConnectOpportunity = require('../models/ConnectOpportunity');
 const ConnectPayout = require('../models/ConnectPayout');
 const ConnectPolicy = require('../models/ConnectPolicy');
 const ConnectReferral = require('../models/ConnectReferral');
@@ -372,6 +374,8 @@ const getAdminOverview = asyncHandler(async (_req, res) => {
   const [
     totalApplications,
     pendingApplications,
+    openOpportunities,
+    unreadApplicantMessages,
     approvedAssociates,
     activePartners,
     totalReferrals,
@@ -380,6 +384,8 @@ const getAdminOverview = asyncHandler(async (_req, res) => {
   ] = await Promise.all([
     ConnectApplication.countDocuments(),
     ConnectApplication.countDocuments({ active: true }),
+    ConnectOpportunity.countDocuments({ status: 'open' }),
+    ConnectApplicationMessage.countDocuments({ senderRole: 'applicant', readAt: null }),
     ConnectAssociate.countDocuments({ status: 'active' }),
     ConnectPartner.countDocuments({ status: 'active' }),
     ConnectReferral.countDocuments(),
@@ -398,6 +404,8 @@ const getAdminOverview = asyncHandler(async (_req, res) => {
     summary: {
       totalApplications,
       pendingApplications,
+      openOpportunities,
+      unreadApplicantMessages,
       approvedAssociates,
       activePartners,
       totalReferrals,
@@ -522,6 +530,7 @@ const reviewApplication = asyncHandler(async (req, res) => {
         type: status === 'approved' ? 'success' : status === 'rejected' ? 'warning' : 'info',
         icon: 'briefcase',
         color: status === 'rejected' ? 'orange' : 'green',
+        connectApplicationId: application._id,
       }], { session });
     });
   } finally {

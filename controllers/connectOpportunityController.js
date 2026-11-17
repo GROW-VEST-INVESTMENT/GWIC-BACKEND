@@ -3,6 +3,7 @@ const ConnectAdminAudit = require('../models/ConnectAdminAudit');
 const ConnectApplication = require('../models/ConnectApplication');
 const ConnectOpportunity = require('../models/ConnectOpportunity');
 const ConnectOpportunityInterest = require('../models/ConnectOpportunityInterest');
+const ConnectOpportunityReaction = require('../models/ConnectOpportunityReaction');
 const Notification = require('../models/Notification');
 const {
   applicationDocumentDownloadUrl,
@@ -87,7 +88,7 @@ const listOpportunities = asyncHandler(async (req, res) => {
     ConnectOpportunity.countDocuments(visibleFilter),
   ]);
   const ids = opportunities.map((opportunity) => opportunity._id);
-  const [interestCounts, myInterests, myApplications] = await Promise.all([
+  const [interestCounts, myInterests, myApplications, reactionRows, myReactions] = await Promise.all([
     ConnectOpportunityInterest.aggregate([
       { $match: { opportunityId: { $in: ids } } },
       { $group: { _id: '$opportunityId', count: { $sum: 1 } } },
@@ -98,15 +99,31 @@ const listOpportunities = asyncHandler(async (req, res) => {
     ConnectApplication.find({ opportunityId: { $in: ids }, userId: req.user._id })
       .select('opportunityId status')
       .lean(),
+    ConnectOpportunityReaction.aggregate([
+      { $match: { opportunityId: { $in: ids } } },
+      { $group: { _id: { opportunityId: '$opportunityId', reaction: '$reaction' }, count: { $sum: 1 } } },
+    ]),
+    ConnectOpportunityReaction.find({ opportunityId: { $in: ids }, userId: req.user._id })
+      .select('opportunityId reaction')
+      .lean(),
   ]);
   const countsById = new Map(interestCounts.map((item) => [String(item._id), item.count]));
   const interestedIds = new Set(myInterests.map((item) => String(item.opportunityId)));
   const applicationsById = new Map(myApplications.map((item) => [String(item.opportunityId), item.status]));
+  const reactionsById = new Map();
+  for (const item of reactionRows) {
+    const opportunityId = String(item._id.opportunityId);
+    if (!reactionsById.has(opportunityId)) reactionsById.set(opportunityId, {});
+    reactionsById.get(opportunityId)[item._id.reaction] = item.count;
+  }
+  const myReactionsById = new Map(myReactions.map((item) => [String(item.opportunityId), item.reaction]));
   return res.json({
     opportunities: opportunities.map((opportunity) => opportunityForClient(opportunity, {
       interestedCount: countsById.get(String(opportunity._id)) || 0,
       isInterested: interestedIds.has(String(opportunity._id)),
       myApplicationStatus: applicationsById.get(String(opportunity._id)) || null,
+      reactionCounts: reactionsById.get(String(opportunity._id)) || {},
+      myReaction: myReactionsById.get(String(opportunity._id)) || null,
       isOpen: opportunity.status === 'open'
         && (!opportunity.publishedAt || opportunity.publishedAt <= now)
         && (!opportunity.deadline || opportunity.deadline > now)
@@ -289,6 +306,7 @@ const createOpportunityApplication = asyncHandler(async (req, res) => {
         type: 'success',
         icon: 'briefcase',
         color: 'green',
+        connectApplicationId: application._id,
       }], { session });
     });
   } catch (error) {
@@ -372,7 +390,7 @@ const listAdminOpportunities = asyncHandler(async (req, res) => {
     .limit(100)
     .lean();
   const ids = opportunities.map((opportunity) => opportunity._id);
-  const [interestCounts, applicationCounts] = await Promise.all([
+  const [interestCounts, applicationCounts, reactionCounts] = await Promise.all([
     ConnectOpportunityInterest.aggregate([
       { $match: { opportunityId: { $in: ids } } },
       { $group: { _id: '$opportunityId', count: { $sum: 1 } } },
@@ -381,14 +399,20 @@ const listAdminOpportunities = asyncHandler(async (req, res) => {
       { $match: { opportunityId: { $in: ids } } },
       { $group: { _id: '$opportunityId', count: { $sum: 1 } } },
     ]),
+    ConnectOpportunityReaction.aggregate([
+      { $match: { opportunityId: { $in: ids } } },
+      { $group: { _id: '$opportunityId', count: { $sum: 1 } } },
+    ]),
   ]);
   const counts = (items) => new Map(items.map((item) => [String(item._id), item.count]));
   const interestsById = counts(interestCounts);
   const applicationsById = counts(applicationCounts);
+  const reactionsById = counts(reactionCounts);
   return res.json({
     opportunities: opportunities.map((opportunity) => opportunityForClient(opportunity, {
       interestedCount: interestsById.get(String(opportunity._id)) || 0,
       applicationCount: applicationsById.get(String(opportunity._id)) || 0,
+      reactionCount: reactionsById.get(String(opportunity._id)) || 0,
     })),
   });
 });

@@ -10,6 +10,7 @@ const notificationSchema = new mongoose.Schema(
     icon: { type: String, default: 'chart' },
     color: { type: String, enum: ['green', 'pink', 'orange', 'blue'], default: 'green' },
     amount: { type: String, default: '' },
+    connectApplicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'ConnectApplication', default: null },
     read: { type: Boolean, default: false },
   },
   { timestamps: true },

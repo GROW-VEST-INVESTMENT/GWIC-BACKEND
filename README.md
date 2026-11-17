@@ -67,3 +67,11 @@ The authenticated staff API is under `/api/admin`:
 - `GET /operations/audit-logs` lists recorded KYC, support, and transaction-access actions. Mutations and audit entries are saved in one MongoDB transaction.
 
 Admin write routes require a valid admin session, admin role, and an approved request origin. Wallets remain read-only.
+
+## Kalma Connect opportunities and recruitment inbox
+
+Connect opportunity routes are mounted under `/api/connect`; staff operations use `/api/admin/connect`. The authenticated portal can list opportunities, save or remove interest, select one reaction per opportunity, apply with private documents, and view its application conversation. The Connect admin can publish or edit opportunities, review applications, and send or reply to messages in the recruitment inbox. Applicants can only access threads belonging to their own application; staff access is role-protected.
+
+Application messages use authenticated HTTPS requests, not Socket.IO. Messages are limited to 2,000 characters, history is returned in chronological order for the most recent page (up to 100 messages) and read state is tracked per recipient. Staff replies create an applicant notification and an audit entry; applicant replies increment the staff inbox's unread count. Opportunity reactions are limited to `interested`, `love`, `exciting`, and `applause`; users can change or remove their reaction. No comments are supported.
+
+Startup ensures unique-per-user reaction and application-message indexes after MongoDB connects. As with other transaction-backed Connect workflows, the production MongoDB deployment must support transactions (a replica set).

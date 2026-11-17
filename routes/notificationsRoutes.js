@@ -33,6 +33,7 @@ router.get('/', async (req, res, next) => {
         }).format(new Date(notification.createdAt)),
         createdAt: notification.createdAt,
         read: Boolean(notification.read),
+        connectApplicationId: notification.connectApplicationId || null,
       })),
     });
   } catch (error) {

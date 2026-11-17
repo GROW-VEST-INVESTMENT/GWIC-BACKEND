@@ -3,6 +3,7 @@ const requireAuth = require('../middleware/requireAuth');
 const requireConnectOrigin = require('../middleware/requireConnectOrigin');
 const { applicationDocumentUpload } = require('../services/connectApplicationDocuments');
 const opportunityController = require('../controllers/connectOpportunityController');
+const communicationController = require('../controllers/connectCommunicationController');
 const {
   getMyConnectSummary,
   createApplication,
@@ -19,8 +20,13 @@ const requireAppOrigin = requireConnectOrigin([process.env.CONNECT_APP_URL]);
 router.use(requireAuth);
 router.get('/me', getMyConnectSummary);
 router.get('/opportunities', opportunityController.listOpportunities);
+router.put('/opportunities/:opportunityId/reaction', requireAppOrigin, communicationController.setOpportunityReaction);
+router.delete('/opportunities/:opportunityId/reaction', requireAppOrigin, communicationController.removeOpportunityReaction);
 router.put('/opportunities/:opportunityId/interest', requireAppOrigin, opportunityController.addOpportunityInterest);
 router.delete('/opportunities/:opportunityId/interest', requireAppOrigin, opportunityController.removeOpportunityInterest);
+router.get('/inbox', communicationController.listApplicantInbox);
+router.get('/applications/:applicationId/messages', communicationController.listApplicantMessages);
+router.post('/applications/:applicationId/messages', requireAppOrigin, communicationController.sendApplicantMessage);
 router.post(
   '/opportunities/:opportunityId/applications',
   requireAppOrigin,

@@ -24,6 +24,7 @@ const connectRoutes = require('./routes/connectRoutes');
 const connectAdminRoutes = require('./routes/connectAdminRoutes');
 const { startCoreSavingsScheduler } = require('./services/coreSavingsScheduler');
 const ensureConnectApplicationIndexes = require('./services/connectApplicationIndexes');
+const ensureConnectCommunicationIndexes = require('./services/connectCommunicationIndexes');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
 const app = express();
@@ -332,6 +333,7 @@ async function startServer() {
   await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 10000 });
   console.log('MongoDB connected.');
   await ensureConnectApplicationIndexes();
+  await ensureConnectCommunicationIndexes();
   await ensureDefaultAdminUser();
   startCoreSavingsScheduler();
   return app.listen(PORT, () => {
