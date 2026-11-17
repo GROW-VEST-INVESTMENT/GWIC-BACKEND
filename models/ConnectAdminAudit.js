@@ -8,6 +8,8 @@ const connectAdminAuditSchema = new mongoose.Schema(
       enum: [
         'application_reviewed',
         'application_message_sent',
+        'connect_id_card_submitted',
+        'connect_id_card_reviewed',
         'partner_status_changed',
         'commission_reviewed',
         'payout_reviewed',
@@ -21,7 +23,7 @@ const connectAdminAuditSchema = new mongoose.Schema(
       ],
       required: true,
     },
-    entityType: { type: String, enum: ['application', 'partner', 'commission', 'payout', 'policy', 'opportunity'], required: true },
+    entityType: { type: String, enum: ['application', 'connect_id_card', 'partner', 'commission', 'payout', 'policy', 'opportunity'], required: true },
     entityId: { type: mongoose.Schema.Types.ObjectId, default: null },
     details: { type: mongoose.Schema.Types.Mixed, default: {} },
   },

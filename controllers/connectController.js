@@ -15,6 +15,10 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const WalletTransaction = require('../models/WalletTransaction');
 const { paystackRequest } = require('../services/paystack');
+const {
+  getProfilePhotoUrl,
+  isConfigured: isProfilePhotoConfigured,
+} = require('../services/profilePhotoStorage');
 const { normalizeAccountName } = require('./walletController');
 const {
   PAYOUT_TIMEZONE,
@@ -157,17 +161,24 @@ function applicationToClient(application) {
 }
 
 const getMyConnectSummary = asyncHandler(async (req, res) => {
-  const [applications, partner, associate, policy] = await Promise.all([
+  const [applications, partner, associate, policy, user] = await Promise.all([
     ConnectApplication.find({ userId: req.user._id })
       .populate('opportunityId', 'title')
       .sort({ createdAt: -1 })
       .lean(),
     buildPartnerSummary(req.user._id),
-    ConnectAssociate.findOne({ userId: req.user._id, status: 'active' }).select('assignedRole').lean(),
+    ConnectAssociate.findOne({ userId: req.user._id, status: 'active' }).select('assignedRole status').lean(),
     getPolicy(),
+    User.findById(req.user._id).select('+profilePhotoPublicId +profilePhotoVersion'),
   ]);
   return res.json({
-    profile: { name: req.user.name, email: req.user.email, phone: req.user.phone || '' },
+    profile: {
+      name: req.user.name,
+      email: req.user.email,
+      phone: req.user.phone || '',
+      photoUrl: user ? getProfilePhotoUrl(user.profilePhotoPublicId, user.profilePhotoVersion) : null,
+      photoUploadAvailable: isProfilePhotoConfigured(),
+    },
     applications: applications.map(applicationToClient),
     partner,
     associate,

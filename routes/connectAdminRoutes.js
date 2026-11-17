@@ -20,6 +20,8 @@ const {
 } = require('../controllers/connectController');
 const opportunityController = require('../controllers/connectOpportunityController');
 const communicationController = require('../controllers/connectCommunicationController');
+const idCardController = require('../controllers/connectIdCardController');
+const { privateImageUpload } = require('../services/connectPrivateImages');
 
 const router = express.Router();
 const requireAdminOrigin = requireConnectOrigin([
@@ -37,7 +39,19 @@ router.patch('/applications/:applicationId', requireAdminOrigin, reviewApplicati
 router.get('/applications/:applicationId/documents/:documentId', opportunityController.getAdminApplicationDocument);
 router.get('/inbox', communicationController.listStaffInbox);
 router.get('/applications/:applicationId/messages', communicationController.listStaffMessages);
-router.post('/applications/:applicationId/messages', requireAdminOrigin, communicationController.sendStaffMessage);
+router.post(
+  '/applications/:applicationId/messages',
+  requireAdminOrigin,
+  privateImageUpload('images', { maxFiles: 3 }),
+  communicationController.sendStaffMessage,
+);
+router.get(
+  '/applications/:applicationId/messages/:messageId/attachments/:attachmentId',
+  communicationController.getStaffMessageAttachment,
+);
+router.get('/id-cards', idCardController.listAdminIdCards);
+router.get('/id-cards/:requestId/photo', idCardController.getAdminIdCardPhoto);
+router.patch('/id-cards/:requestId', requireAdminOrigin, idCardController.reviewIdCardRequest);
 router.get('/opportunities', opportunityController.listAdminOpportunities);
 router.post('/opportunities', requireAdminOrigin, opportunityController.createOpportunity);
 router.patch('/opportunities/:opportunityId', requireAdminOrigin, opportunityController.updateOpportunity);

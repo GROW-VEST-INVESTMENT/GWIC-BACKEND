@@ -81,8 +81,14 @@ test('Connect APIs require an authenticated account and signup rejects malformed
     assert.equal(inboxResponse.status, 401);
     const messagesResponse = await fetch(`${baseUrl}/api/connect/applications/507f1f77bcf86cd799439011/messages`);
     assert.equal(messagesResponse.status, 401);
+    const idCardResponse = await fetch(`${baseUrl}/api/connect/id-card`);
+    assert.equal(idCardResponse.status, 401);
+    const idCardImageResponse = await fetch(`${baseUrl}/api/connect/id-cards/507f1f77bcf86cd799439011/photo`);
+    assert.equal(idCardImageResponse.status, 401);
     const adminInboxResponse = await fetch(`${baseUrl}/api/admin/connect/inbox`);
     assert.equal(adminInboxResponse.status, 401);
+    const adminIdCardsResponse = await fetch(`${baseUrl}/api/admin/connect/id-cards`);
+    assert.equal(adminIdCardsResponse.status, 401);
     const reactionResponse = await fetch(`${baseUrl}/api/connect/opportunities/507f1f77bcf86cd799439011/reaction`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -150,6 +156,27 @@ test('applicant conversation access is scoped to the authenticated application o
     assert.equal(String(filter.userId), '507f1f77bcf86cd799439012');
     assert.equal(nextError.status, 404);
     assert.match(nextError.message, /application not found/i);
+  } finally {
+    ConnectApplication.findOne = originalFindOne;
+  }
+});
+
+test('staff users do not get admin-wide thread access through applicant routes', async () => {
+  const originalFindOne = ConnectApplication.findOne;
+  let filter;
+  ConnectApplication.findOne = (query) => {
+    filter = query;
+    return queryResult(null);
+  };
+  const response = makeResponse();
+  let nextError;
+  try {
+    await communicationController.listApplicantMessages({
+      params: { applicationId: '507f1f77bcf86cd799439011' },
+      user: { _id: '507f1f77bcf86cd799439012', role: 'staff' },
+    }, response, (error) => { nextError = error; });
+    assert.equal(String(filter.userId), '507f1f77bcf86cd799439012');
+    assert.equal(nextError.status, 404);
   } finally {
     ConnectApplication.findOne = originalFindOne;
   }

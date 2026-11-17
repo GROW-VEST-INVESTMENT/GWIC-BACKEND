@@ -5,6 +5,13 @@ const ConnectApplicationMessage = require('../models/ConnectApplicationMessage')
 const ConnectOpportunity = require('../models/ConnectOpportunity');
 const ConnectOpportunityReaction = require('../models/ConnectOpportunityReaction');
 const Notification = require('../models/Notification');
+const {
+  deletePrivateImage,
+  safeImageName,
+  streamPrivateImage,
+  uploadPrivateImage,
+  validatePrivateImage,
+} = require('../services/connectPrivateImages');
 
 const REACTIONS = ['interested', 'love', 'exciting', 'applause'];
 const MAX_MESSAGE_LENGTH = 2000;
@@ -23,10 +30,14 @@ function isStaff(req) {
   return ['staff', 'admin', 'super_admin'].includes(req.user?.role);
 }
 
-async function findApplication(req, applicationId) {
+async function findApplication(req, applicationId, staffView = false) {
   if (!mongoose.isValidObjectId(applicationId)) throw messageError(400, 'Choose a valid application.');
   const filter = { _id: applicationId };
-  if (!isStaff(req)) filter.userId = req.user._id;
+  if (staffView) {
+    if (!isStaff(req)) throw messageError(403, 'Connect staff access is required.');
+  } else {
+    filter.userId = req.user._id;
+  }
   const application = await ConnectApplication.findOne(filter)
     .select('_id userId status roleInterest type opportunityId')
     .populate('opportunityId', 'title');
@@ -41,6 +52,12 @@ function messageForClient(message) {
     senderId: message.senderId,
     senderRole: message.senderRole,
     body: message.body,
+    attachments: (message.attachments || []).map((attachment) => ({
+      id: attachment._id,
+      name: attachment.name,
+      format: attachment.format,
+      bytes: attachment.bytes,
+    })),
     readAt: message.readAt,
     createdAt: message.createdAt,
   };
@@ -141,7 +158,7 @@ const listApplicantInbox = asyncHandler(async (req, res) => listInbox(req, res, 
 const listStaffInbox = asyncHandler(async (req, res) => listInbox(req, res, true));
 
 async function listMessages(req, res, staffView) {
-  const application = await findApplication(req, req.params.applicationId);
+  const application = await findApplication(req, req.params.applicationId, staffView);
   const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 100));
   const cursor = req.query.before ? String(req.query.before).split('|') : null;
   const beforeDate = cursor ? new Date(cursor[0]) : null;
@@ -187,22 +204,49 @@ const listApplicantMessages = asyncHandler(async (req, res) => listMessages(req,
 const listStaffMessages = asyncHandler(async (req, res) => listMessages(req, res, true));
 
 async function sendMessage(req, res, staffView) {
-  const application = await findApplication(req, req.params.applicationId);
-  const body = req.body?.body;
-  if (typeof body !== 'string' || !body.trim() || body.trim().length > MAX_MESSAGE_LENGTH) {
+  const application = await findApplication(req, req.params.applicationId, staffView);
+  const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+  const files = req.files || [];
+  if (body.length > MAX_MESSAGE_LENGTH) {
     return res.status(400).json({ message: `Write a message of 1 to ${MAX_MESSAGE_LENGTH} characters.` });
+  }
+  if (!body && !files.length) {
+    return res.status(400).json({ message: `Write a message of 1 to ${MAX_MESSAGE_LENGTH} characters or attach at least one image.` });
+  }
+  if (files.length > 3 || files.reduce((total, file) => total + file.size, 0) > 10 * 1024 * 1024) {
+    return res.status(413).json({ message: 'Attach up to three images totaling no more than 10 MB.' });
+  }
+  files.forEach((file) => validatePrivateImage(file));
+  const uploaded = [];
+  try {
+    for (const file of files) uploaded.push(await uploadPrivateImage(file, req.user._id, 'connect-message-images'));
+  } catch (error) {
+    try {
+      await Promise.all(uploaded.map((image) => deletePrivateImage(image.publicId)));
+    } catch (cleanupError) {
+      console.error('Unable to remove unused Connect message images:', cleanupError.message);
+    }
+    throw error;
   }
 
   const senderRole = staffView ? 'staff' : 'applicant';
-  const session = await mongoose.startSession();
+  let session;
   let created;
   try {
+    session = await mongoose.startSession();
     await session.withTransaction(async () => {
       [created] = await ConnectApplicationMessage.create([{
         applicationId: application._id,
         senderId: req.user._id,
         senderRole,
-        body: body.trim(),
+        body,
+        attachments: uploaded.map((image) => ({
+          name: safeImageName(image.name),
+          publicId: image.publicId,
+          format: image.format,
+          mimeType: image.mimeType,
+          bytes: image.bytes,
+        })),
       }], { session });
       await ConnectApplication.updateOne(
         { _id: application._id },
@@ -213,7 +257,7 @@ async function sendMessage(req, res, staffView) {
         await Notification.create([{
           userId: application.userId,
           title: 'A message from the Kalma Connect team',
-          message: body.trim().slice(0, 500),
+          message: (body || `Sent ${uploaded.length} image attachment${uploaded.length === 1 ? '' : 's'}.`).slice(0, 500),
           category: 'System',
           type: 'info',
           icon: 'briefcase',
@@ -225,15 +269,40 @@ async function sendMessage(req, res, staffView) {
           action: 'application_message_sent',
           entityType: 'application',
           entityId: application._id,
-          details: { messageId: String(created._id) },
+          details: { messageId: String(created._id), attachmentCount: uploaded.length },
         }], { session });
       }
     });
+  } catch (error) {
+    try {
+      await Promise.all(uploaded.map((image) => deletePrivateImage(image.publicId)));
+    } catch (cleanupError) {
+      console.error('Unable to remove unused Connect message images:', cleanupError.message);
+    }
+    throw error;
   } finally {
-    await session.endSession();
+    if (session) await session.endSession();
   }
   return res.status(201).json({ message: messageForClient(created) });
 }
+
+async function getMessageAttachment(req, res, staffView) {
+  const application = await findApplication(req, req.params.applicationId, staffView);
+  if (!mongoose.isValidObjectId(req.params.messageId) || !mongoose.isValidObjectId(req.params.attachmentId)) {
+    return res.status(400).json({ message: 'Choose a valid message attachment.' });
+  }
+  const message = await ConnectApplicationMessage.findOne({
+    _id: req.params.messageId,
+    applicationId: application._id,
+    'attachments._id': req.params.attachmentId,
+  }).select('attachments');
+  const attachment = message?.attachments.id(req.params.attachmentId);
+  if (!attachment) return res.status(404).json({ message: 'Message attachment not found.' });
+  return streamPrivateImage(res, attachment.publicId, attachment.format);
+}
+
+const getApplicantMessageAttachment = asyncHandler(async (req, res) => getMessageAttachment(req, res, false));
+const getStaffMessageAttachment = asyncHandler(async (req, res) => getMessageAttachment(req, res, true));
 
 const sendApplicantMessage = asyncHandler(async (req, res) => sendMessage(req, res, false));
 const sendStaffMessage = asyncHandler(async (req, res) => sendMessage(req, res, true));
@@ -243,6 +312,8 @@ module.exports = {
   listApplicantMessages,
   listStaffInbox,
   listStaffMessages,
+  getApplicantMessageAttachment,
+  getStaffMessageAttachment,
   removeOpportunityReaction,
   sendApplicantMessage,
   sendStaffMessage,

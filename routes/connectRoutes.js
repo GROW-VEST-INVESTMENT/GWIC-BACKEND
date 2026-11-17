@@ -2,8 +2,10 @@ const express = require('express');
 const requireAuth = require('../middleware/requireAuth');
 const requireConnectOrigin = require('../middleware/requireConnectOrigin');
 const { applicationDocumentUpload } = require('../services/connectApplicationDocuments');
+const { privateImageUpload } = require('../services/connectPrivateImages');
 const opportunityController = require('../controllers/connectOpportunityController');
 const communicationController = require('../controllers/connectCommunicationController');
+const idCardController = require('../controllers/connectIdCardController');
 const {
   getMyConnectSummary,
   createApplication,
@@ -25,7 +27,24 @@ router.put('/opportunities/:opportunityId/interest', requireAppOrigin, opportuni
 router.delete('/opportunities/:opportunityId/interest', requireAppOrigin, opportunityController.removeOpportunityInterest);
 router.get('/inbox', communicationController.listApplicantInbox);
 router.get('/applications/:applicationId/messages', communicationController.listApplicantMessages);
-router.post('/applications/:applicationId/messages', requireAppOrigin, communicationController.sendApplicantMessage);
+router.post(
+  '/applications/:applicationId/messages',
+  requireAppOrigin,
+  privateImageUpload('images', { maxFiles: 3 }),
+  communicationController.sendApplicantMessage,
+);
+router.get(
+  '/applications/:applicationId/messages/:messageId/attachments/:attachmentId',
+  communicationController.getApplicantMessageAttachment,
+);
+router.get('/id-card', idCardController.getMyIdCard);
+router.get('/id-cards/:requestId/photo', idCardController.getMyIdCardPhoto);
+router.post(
+  '/id-card',
+  requireAppOrigin,
+  privateImageUpload('photo', { maxFiles: 1, maxBytes: 2 * 1024 * 1024 }),
+  idCardController.submitIdCardRequest,
+);
 router.post(
   '/opportunities/:opportunityId/applications',
   requireAppOrigin,
