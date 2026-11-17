@@ -11,6 +11,8 @@ const {
   reviewCommission,
   listAdminPayouts,
   reviewPayout,
+  submitPayoutTransferOtp,
+  reconcilePayoutTransfer,
   getAdminPolicy,
   updateAdminPolicy,
   getAdminOverview,
@@ -45,6 +47,8 @@ router.get('/commissions', listAdminCommissions);
 router.patch('/commissions/:commissionId', requireAdminOrigin, reviewCommission);
 router.get('/payouts', listAdminPayouts);
 router.patch('/payouts/:payoutId', requireAdminOrigin, reviewPayout);
+router.post('/payouts/:payoutId/otp', requireAdminOrigin, submitPayoutTransferOtp);
+router.post('/payouts/:payoutId/reconcile', requireAdminOrigin, reconcilePayoutTransfer);
 router.get('/policy', getAdminPolicy);
 router.patch('/policy', requireAdminOrigin, updateAdminPolicy);
 

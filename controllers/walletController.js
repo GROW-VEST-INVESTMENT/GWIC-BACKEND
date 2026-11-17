@@ -6,6 +6,9 @@ const Wallet = require('../models/Wallet');
 const WalletTransaction = require('../models/WalletTransaction');
 const User = require('../models/User');
 const LinkedBankAccount = require('../models/LinkedBankAccount');
+const {
+  handleConnectPayoutWebhook,
+} = require('../services/connectPayoutTransfers');
 const { paystackRequest, verifyWebhookSignature } = require('../services/paystack');
 const { createJournal } = require('../services/coreSavings');
 const { getOrCreateWallet } = require('../services/wallet');
@@ -903,6 +906,7 @@ async function handlePaystackWebhook(req, res) {
       ['transfer.success', 'transfer.failed', 'transfer.reversed'].includes(event.event)
       && typeof reference === 'string'
     ) {
+      await handleConnectPayoutWebhook(event);
       const transaction = await WalletTransaction.findOne({ reference, type: 'withdrawal' });
       if (transaction) {
         if (event.event === 'transfer.success') {

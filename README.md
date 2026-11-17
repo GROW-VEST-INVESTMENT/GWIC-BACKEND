@@ -57,7 +57,13 @@ Approved Connect partners receive a unique promo code to share. Customers enter 
 
 The configurable reward schedule is capped at ₦400 per referral: ₦40 for signup, ₦60 for KYC approval, ₦200 for the first successful wallet deposit after KYC and within 60 days of signup, and ₦100 after two successful wallet deposits on separate UTC dates after KYC and within that same 60-day signup window. Deposits must be settled successfully; refunded or reversed deposits invalidate pending deposit rewards. The active-saver milestone currently measures wallet deposit activity, not recurring savings-plan contributions.
 
-Every commission remains pending until administrator review. Payouts are manual; the system does not initiate transfers. Rewards are disabled by default and cannot be enabled unless `CONNECT_COMMISSION_POLICY_APPROVED=true` is set by the service operator after formal compliance approval. Keep the environment gate false until that approval and rollout are explicitly authorized.
+Every commission remains pending until administrator review. A partner can request a withdrawal from approved earnings after linking a verified bank account. An admin's **Approve & pay** action starts a Paystack transfer from the business Paystack balance; the payout is marked paid only after a `transfer.success` webhook or an admin status reconciliation confirms success. Paystack `transfer.failed` and `transfer.reversed` events release the reserved Connect balance, and the partner receives a notification. Transfer references are persisted before the provider call to prevent duplicate payments; an uncertain transfer stays reserved until checked in Paystack. If Paystack requires an OTP, an admin enters it in the Connect withdrawals screen and it is sent directly to Paystack, never stored.
+
+Payouts that were already marked `approved` before this Paystack flow was deployed are treated as legacy manual payouts. They are never automatically sent to Paystack; an admin can record them as paid only after verifying the external payment and entering its reference.
+
+Connect payouts use the existing `PAYSTACK_SECRET_KEY`, verified linked-bank recipient, and `/api/paystack/webhook` endpoint. Ensure the Paystack account has transfers enabled and sufficient NGN balance before approving withdrawals. Test the complete flow with a Paystack test key before using a live key. Wallet withdrawals and Connect partner withdrawals are separate payment flows.
+
+Rewards are disabled by default and cannot be enabled unless `CONNECT_COMMISSION_POLICY_APPROVED=true` is set by the service operator after formal compliance approval. Keep the environment gate false until that approval and rollout are explicitly authorized.
 
 ## Admin dashboard
 

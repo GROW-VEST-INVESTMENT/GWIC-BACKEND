@@ -46,10 +46,12 @@ async function paystackRequest(path, options = {}) {
       );
       error.status = 503;
       error.code = 'PAYSTACK_AUTH';
+      error.providerStatus = response.status;
       throw error;
     }
     const error = new Error(result.message || 'Paystack could not complete the request.');
     error.status = response.status >= 400 && response.status < 500 ? 400 : 502;
+    error.providerStatus = response.status;
     throw error;
   }
 

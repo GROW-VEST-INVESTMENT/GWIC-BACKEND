@@ -591,7 +591,10 @@ async function deleteLinkedBank(req, res, next) {
     const bank = await LinkedBankAccount.findOne({ _id: req.params.bankId, userId: req.user.id })
       .select('+recipientCode');
     if (!bank) return sendError(res, 404, 'Linked bank account not found.');
-    if (await ConnectPayout.exists({ linkedBankId: bank._id, status: { $in: ['pending', 'approved'] } })) {
+    if (await ConnectPayout.exists({
+      linkedBankId: bank._id,
+      status: { $in: ['pending', 'approved', 'processing', 'requires_otp'] },
+    })) {
       return sendError(res, 409, 'This bank account is attached to a Connect withdrawal that has not been completed.');
     }
     await paystackRequest(`/transferrecipient/${encodeURIComponent(bank.recipientCode)}`, { method: 'DELETE' });

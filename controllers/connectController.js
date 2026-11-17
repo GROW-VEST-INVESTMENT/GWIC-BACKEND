@@ -14,11 +14,17 @@ const LinkedBankAccount = require('../models/LinkedBankAccount');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
 const WalletTransaction = require('../models/WalletTransaction');
+const { paystackRequest } = require('../services/paystack');
 const {
   MAX_REFERRAL_REWARD_NAIRA,
   isValidRewardSchedule,
   releaseCommissionReservation,
 } = require('../services/connectCommissions');
+const {
+  ACTIVE_PAYOUT_STATUSES,
+  providerStatusToPayoutStatus,
+  updateConnectPayoutTransfer,
+} = require('../services/connectPayoutTransfers');
 
 const APPLICATION_TYPES = ['applicant', 'partner'];
 const APPLICATION_STATUSES = ['pending', 'in_review', 'interview_scheduled', 'approved', 'rejected'];
@@ -68,7 +74,7 @@ async function getBalance(partnerId, session) {
       { $group: { _id: null, total: { $sum: '$amountKobo' } } },
     ]).session(session || null),
     ConnectPayout.aggregate([
-      { $match: { partnerId, status: { $in: ['pending', 'approved', 'paid'] } } },
+      { $match: { partnerId, status: { $in: ['pending', 'approved', ...ACTIVE_PAYOUT_STATUSES, 'paid'] } } },
       { $group: { _id: null, total: { $sum: '$amountKobo' } } },
     ]).session(session || null),
   ]);
@@ -106,7 +112,11 @@ async function buildPartnerSummary(userId) {
     withdrawals: {
       pendingNaira: toNaira(payoutByStatus.pending?.amountKobo || 0),
       approvedNaira: toNaira(payoutByStatus.approved?.amountKobo || 0),
+      processingNaira: toNaira(payoutByStatus.processing?.amountKobo || 0),
+      requiresOtpNaira: toNaira(payoutByStatus.requires_otp?.amountKobo || 0),
       paidNaira: toNaira(payoutByStatus.paid?.amountKobo || 0),
+      failedNaira: toNaira(payoutByStatus.failed?.amountKobo || 0),
+      reversedNaira: toNaira(payoutByStatus.reversed?.amountKobo || 0),
     },
     availableBalanceNaira: toNaira(availableBalanceKobo),
   };
@@ -265,7 +275,7 @@ const listMyPayouts = asyncHandler(async (req, res) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .select('amountKobo status reviewNote paymentReference createdAt reviewedAt paidAt')
+      .select('amountKobo status reviewNote paymentReference transferReference transferStatus transferError createdAt reviewedAt paidAt reversedAt')
       .lean(),
     ConnectPayout.countDocuments({ userId: req.user._id }),
   ]);
@@ -383,7 +393,7 @@ const getAdminOverview = asyncHandler(async (_req, res) => {
       { $group: { _id: '$status', amountKobo: { $sum: '$amountKobo' }, count: { $sum: 1 } } },
     ]),
     ConnectPayout.aggregate([
-      { $match: { status: { $in: ['pending', 'approved', 'paid'] } } },
+      { $match: { status: { $in: ['pending', 'approved', ...ACTIVE_PAYOUT_STATUSES, 'paid'] } } },
       { $group: { _id: '$status', amountKobo: { $sum: '$amountKobo' }, count: { $sum: 1 } } },
     ]),
   ]);
@@ -402,6 +412,12 @@ const getAdminOverview = asyncHandler(async (_req, res) => {
       approvedCommissionNaira: toNaira(commissions.approved?.amountKobo || 0),
       pendingPayoutNaira: toNaira(payouts.pending?.amountKobo || 0),
       approvedPayoutNaira: toNaira(payouts.approved?.amountKobo || 0),
+      processingPayoutNaira: toNaira(
+        (payouts.processing?.amountKobo || 0) + (payouts.requires_otp?.amountKobo || 0),
+      ),
+      failedPayoutNaira: toNaira(
+        (payouts.failed?.amountKobo || 0) + (payouts.reversed?.amountKobo || 0),
+      ),
       paidPayoutNaira: toNaira(payouts.paid?.amountKobo || 0),
     },
   });
@@ -682,7 +698,9 @@ const reviewCommission = asyncHandler(async (req, res) => {
 const listAdminPayouts = asyncHandler(async (req, res) => {
   const { page, limit, skip } = pageOptions(req);
   const filter = {};
-  if (['pending', 'approved', 'rejected', 'paid'].includes(req.query.status)) filter.status = req.query.status;
+  if (['pending', 'approved', 'processing', 'requires_otp', 'rejected', 'paid', 'failed', 'reversed'].includes(req.query.status)) {
+    filter.status = req.query.status;
+  }
   const [payouts, total] = await Promise.all([
     ConnectPayout.find(filter)
       .populate('userId', 'name email phone')
@@ -713,32 +731,174 @@ const reviewPayout = asyncHandler(async (req, res) => {
   }
   const payout = await ConnectPayout.findById(req.params.payoutId);
   if (!payout) return res.status(404).json({ message: 'Withdrawal request not found.' });
-  const allowedTransitions = {
-    pending: ['approved', 'rejected'],
-    approved: ['paid'],
-    rejected: [],
-    paid: [],
-  };
-  if (!allowedTransitions[payout.status].includes(status)) {
-    return res.status(409).json({ message: `A ${payout.status} withdrawal cannot be moved to ${status}.` });
+  if (status === 'paid') {
+    if (payout.status !== 'approved' || payout.transferReference || !paymentReference.trim()) {
+      return res.status(409).json({ message: 'Only a previously approved legacy withdrawal with a confirmed external payment can be recorded as paid.' });
+    }
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const updated = await ConnectPayout.findOneAndUpdate(
+          {
+            _id: payout._id,
+            status: 'approved',
+            transferReference: { $in: [null, ''] },
+          },
+          {
+            $set: {
+              status: 'paid',
+              reviewNote: reviewNote.trim(),
+              paymentReference: paymentReference.trim(),
+              reviewedBy: req.user._id,
+              reviewedAt: new Date(),
+              paidAt: new Date(),
+            },
+          },
+          { new: true, runValidators: true, session },
+        );
+        if (!updated) throw messageError(409, 'This legacy withdrawal was already updated.');
+        Object.assign(payout, updated.toObject());
+        await ConnectAdminAudit.create([{
+          actorId: req.user._id,
+          action: 'payout_reviewed',
+          entityType: 'payout',
+          entityId: payout._id,
+          details: { status: 'paid', paymentReference: payout.paymentReference, legacyManualPayment: true },
+        }], { session });
+        await Notification.create([{
+          userId: payout.userId,
+          title: 'Your Connect withdrawal was updated',
+          message: `Your previously approved Connect withdrawal was recorded as paid. Payment reference: ${payout.paymentReference}.`,
+          category: 'System',
+          type: 'success',
+          icon: 'wallet',
+          color: 'green',
+        }], { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+    return res.json({ payout: { id: payout._id, status: payout.status } });
   }
-  if (status === 'paid' && !paymentReference.trim()) {
-    return res.status(400).json({ message: 'Enter a payment reference to mark this withdrawal paid.' });
+  if (status === 'rejected' && payout.status !== 'pending') {
+    return res.status(409).json({ message: `A ${payout.status} withdrawal cannot be rejected.` });
   }
-  const previousStatus = payout.status;
+
+  if (status === 'approved') {
+    if (payout.status !== 'pending') {
+      return res.status(409).json({ message: `A ${payout.status} withdrawal cannot be approved and paid again.` });
+    }
+    const bank = await LinkedBankAccount.findOne({
+      _id: payout.linkedBankId,
+      userId: payout.userId,
+    }).select('+recipientCode');
+    if (!bank?.recipientCode) {
+      return res.status(409).json({ message: "The partner's linked Paystack bank recipient is unavailable. Ask them to relink their bank account." });
+    }
+
+    const transferReference = payout.transferReference || `KALMA_CONNECT_${crypto.randomUUID()}`;
+    const session = await mongoose.startSession();
+    let processingPayout;
+    try {
+      await session.withTransaction(async () => {
+        processingPayout = await ConnectPayout.findOneAndUpdate(
+          { _id: payout._id, status: 'pending' },
+          {
+            $set: {
+              status: 'processing',
+              reviewNote: reviewNote.trim(),
+              reviewedBy: req.user._id,
+              reviewedAt: new Date(),
+              transferReference,
+              transferStartedAt: new Date(),
+              transferStatus: 'pending',
+              transferError: '',
+            },
+          },
+          { new: true, runValidators: true, session },
+        );
+        if (!processingPayout) throw messageError(409, 'This withdrawal was already reviewed or submitted to Paystack.');
+
+        await ConnectAdminAudit.create([{
+          actorId: req.user._id,
+          action: 'payout_reviewed',
+          entityType: 'payout',
+          entityId: payout._id,
+          details: {
+            status: 'processing',
+            reviewNote: reviewNote.trim(),
+            transferReference,
+          },
+        }], { session });
+        await Notification.create([{
+          userId: payout.userId,
+          title: 'Your Connect withdrawal was approved',
+          message: 'Your withdrawal was approved and is being sent to Paystack. We will notify you when the transfer is confirmed.',
+          category: 'System',
+          type: 'info',
+          icon: 'wallet',
+          color: 'blue',
+        }], { session });
+      });
+    } finally {
+      await session.endSession();
+    }
+
+    let transfer;
+    try {
+      transfer = await paystackRequest('/transfer', {
+        method: 'POST',
+        body: JSON.stringify({
+          source: 'balance',
+          amount: processingPayout.amountKobo,
+          recipient: bank.recipientCode,
+          reason: 'Kalma Connect partner withdrawal',
+          reference: transferReference,
+        }),
+      });
+      if (!transfer.transfer_code) throw new Error('Paystack did not return a transfer confirmation.');
+    } catch (error) {
+      await ConnectPayout.updateOne(
+        { _id: payout._id, status: 'processing' },
+        { $set: { transferError: 'Paystack did not confirm the transfer request. Check the Paystack status before taking further action.' } },
+      );
+      return res.status(error.status === 503 ? 503 : 502).json({
+        message: 'The withdrawal approval was recorded, but Paystack did not confirm the transfer request. The amount remains reserved. Check Paystack status before retrying or paying manually.',
+      });
+    }
+
+    const statusAfterSubmission = transfer.status === 'otp' ? 'requires_otp' : 'processing';
+    await ConnectPayout.updateOne(
+      { _id: payout._id, status: 'processing' },
+      {
+        $set: {
+          status: statusAfterSubmission,
+          transferCode: transfer.transfer_code,
+          transferStatus: transfer.status || 'pending',
+          transferError: '',
+        },
+      },
+    );
+    const latestPayout = await ConnectPayout.findById(payout._id).select('status').lean();
+    return res.json({
+      payout: { id: payout._id, status: latestPayout?.status || statusAfterSubmission },
+      message: statusAfterSubmission === 'requires_otp'
+        ? 'Paystack requires an OTP confirmation. Enter the code in the admin withdrawal screen.'
+        : 'Withdrawal submitted to Paystack. It will be marked paid after Paystack confirms the transfer.',
+    });
+  }
+
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
       const updated = await ConnectPayout.findOneAndUpdate(
-        { _id: payout._id, status: previousStatus },
+        { _id: payout._id, status: 'pending' },
         {
           $set: {
             status,
             reviewNote: reviewNote.trim(),
-            paymentReference: status === 'paid' ? paymentReference.trim() : payout.paymentReference,
             reviewedBy: req.user._id,
             reviewedAt: new Date(),
-            ...(status === 'paid' ? { paidAt: new Date() } : {}),
           },
         },
         { new: true, runValidators: true, session },
@@ -750,22 +910,117 @@ const reviewPayout = asyncHandler(async (req, res) => {
         action: 'payout_reviewed',
         entityType: 'payout',
         entityId: payout._id,
-        details: { status, reviewNote: payout.reviewNote, paymentReference: payout.paymentReference },
+        details: { status, reviewNote: payout.reviewNote },
       }], { session });
       await Notification.create([{
         userId: payout.userId,
         title: 'Your Connect withdrawal was updated',
-        message: `Your ${toNaira(payout.amountKobo).toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} withdrawal is now ${status}.${status === 'paid' ? ` Payment reference: ${payout.paymentReference}.` : ''}${payout.reviewNote ? ` ${payout.reviewNote}` : ''}`,
+        message: `Your ${toNaira(payout.amountKobo).toLocaleString('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 0 })} withdrawal was rejected.${payout.reviewNote ? ` ${payout.reviewNote}` : ''}`,
         category: 'System',
-        type: status === 'paid' ? 'success' : status === 'rejected' ? 'warning' : 'info',
+        type: 'warning',
         icon: 'wallet',
-        color: status === 'rejected' ? 'orange' : 'green',
+        color: 'orange',
       }], { session });
     });
   } finally {
     await session.endSession();
   }
   return res.json({ payout: { id: payout._id, status: payout.status } });
+});
+
+const submitPayoutTransferOtp = asyncHandler(async (req, res) => {
+  const { otp } = req.body || {};
+  if (typeof otp !== 'string' || !/^\d{4,10}$/.test(otp)) {
+    return res.status(400).json({ message: 'Enter the numeric OTP supplied by Paystack.' });
+  }
+  const payout = await ConnectPayout.findById(req.params.payoutId).select('+transferCode');
+  if (!payout || payout.status !== 'requires_otp' || !payout.transferCode) {
+    return res.status(409).json({ message: 'This withdrawal is not awaiting a Paystack OTP.' });
+  }
+  const transfer = await paystackRequest('/transfer/finalize_transfer', {
+    method: 'POST',
+    body: JSON.stringify({ transfer_code: payout.transferCode, otp }),
+  });
+  const transferStatus = transfer.status || 'pending';
+  await ConnectPayout.updateOne(
+    { _id: payout._id, status: 'requires_otp' },
+    {
+      $set: {
+        status: transferStatus === 'otp' ? 'requires_otp' : 'processing',
+        transferStatus,
+        transferError: '',
+      },
+    },
+  );
+  await ConnectAdminAudit.create({
+    actorId: req.user._id,
+    action: 'payout_transfer_otp_submitted',
+    entityType: 'payout',
+    entityId: payout._id,
+    details: { transferReference: payout.transferReference },
+  });
+  const latestPayout = await ConnectPayout.findById(payout._id).select('status').lean();
+  return res.json({
+    payout: { id: payout._id, status: latestPayout?.status || 'processing' },
+    message: 'Paystack accepted the OTP. The transfer will be marked paid after confirmation.',
+  });
+});
+
+const reconcilePayoutTransfer = asyncHandler(async (req, res) => {
+  const payout = await ConnectPayout.findById(req.params.payoutId).select('+transferCode');
+  if (!payout || !payout.transferReference) {
+    return res.status(404).json({ message: 'Paystack transfer reference not found.' });
+  }
+  if (payout.status !== 'processing') {
+    return res.status(409).json({ message: `A ${payout.status} withdrawal cannot be reconciled.` });
+  }
+
+  let transfer;
+  try {
+    transfer = await paystackRequest(`/transfer/verify/${encodeURIComponent(payout.transferReference)}`);
+  } catch (error) {
+    if (error.providerStatus === 404) {
+      await updateConnectPayoutTransfer(
+        payout.transferReference,
+        'failed',
+        'Paystack could not find the transfer. The reserved amount is available again.',
+      );
+      return res.json({
+        payout: { id: payout._id, status: 'failed' },
+        message: 'Paystack confirmed there is no transfer for this reference. The amount is available again; a new request can be submitted.',
+      });
+    }
+    throw error;
+  }
+
+  const mappedStatus = providerStatusToPayoutStatus(transfer.status);
+  if (!mappedStatus) {
+    return res.status(502).json({ message: 'Paystack returned an unrecognized transfer status. The withdrawal remains reserved.' });
+  }
+  if (['paid', 'failed', 'reversed'].includes(mappedStatus)) {
+    await updateConnectPayoutTransfer(
+      payout.transferReference,
+      transfer.status,
+      transfer.failure_reason || '',
+    );
+  } else {
+    await ConnectPayout.updateOne(
+      { _id: payout._id, status: 'processing' },
+      {
+        $set: {
+          status: mappedStatus,
+          transferStatus: String(transfer.status).toLowerCase(),
+          ...(transfer.transfer_code ? { transferCode: transfer.transfer_code } : {}),
+          transferError: '',
+        },
+      },
+    );
+  }
+  const latestPayout = await ConnectPayout.findById(payout._id).select('status').lean();
+  return res.json({
+    payout: { id: payout._id, status: latestPayout?.status || mappedStatus },
+    message: 'Paystack transfer status refreshed.',
+  });
 });
 
 const getAdminPolicy = asyncHandler(async (_req, res) => {
@@ -862,6 +1117,8 @@ module.exports = {
   reviewCommission,
   listAdminPayouts,
   reviewPayout,
+  submitPayoutTransferOtp,
+  reconcilePayoutTransfer,
   getAdminPolicy,
   updateAdminPolicy,
 };
