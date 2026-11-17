@@ -18,6 +18,7 @@ const {
 const router = express.Router();
 const requireAppOrigin = requireConnectOrigin([process.env.CONNECT_APP_URL]);
 
+router.get('/id-cards/verify/:verificationId', idCardController.verifyIssuedIdCard);
 router.use(requireAuth);
 router.get('/me', getMyConnectSummary);
 router.get('/opportunities', opportunityController.listOpportunities);

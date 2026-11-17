@@ -6,6 +6,8 @@ const ConnectApplicationMessage = require('../models/ConnectApplicationMessage')
 const ConnectAssociate = require('../models/ConnectAssociate');
 const ConnectIdCardRequest = require('../models/ConnectIdCardRequest');
 const idCardController = require('../controllers/connectIdCardController');
+const User = require('../models/User');
+const Notification = require('../models/Notification');
 const { privateImageUrl, streamPrivateImage, validatePrivateImage } = require('../services/connectPrivateImages');
 
 const userId = '507f1f77bcf86cd799439011';
@@ -174,6 +176,7 @@ test('ID card reviews reject invalid status and missing change-request notes bef
   for (const body of [
     { status: 'issued' },
     { status: 'changes_requested', reviewNote: '' },
+    { status: 'revoked', reviewNote: '' },
   ]) {
     const response = makeResponse();
     await idCardController.reviewIdCardRequest({
@@ -183,5 +186,181 @@ test('ID card reviews reject invalid status and missing change-request notes bef
     }, response, (error) => { throw error; });
     assert.equal(response.statusCode, 400);
     assert.match(response.body.message, /valid ID card decision/i);
+  }
+});
+
+test('admin can unissue only an issued card with a reason and notify the owner', async () => {
+  const methods = [
+    [ConnectIdCardRequest, 'findById'],
+    [ConnectIdCardRequest, 'findOneAndUpdate'],
+    [ConnectAdminAudit, 'create'],
+    [Notification, 'create'],
+    [User, 'findById'],
+    [require('mongoose'), 'startSession'],
+  ];
+  const originals = methods.map(([target, key]) => target[key]);
+  const issuedCard = {
+    _id: '507f1f77bcf86cd799439014',
+    userId,
+    associateId,
+    status: 'approved',
+  };
+  const auditEntries = [];
+  const notifications = [];
+  let updateFilter;
+  let update;
+  ConnectIdCardRequest.findById = () => ({ select: async () => issuedCard });
+  ConnectIdCardRequest.findOneAndUpdate = async (filter, changes) => {
+    updateFilter = filter;
+    update = changes;
+    return {
+      _id: issuedCard._id,
+      userId,
+      status: 'revoked',
+      reviewNote: 'Associate is no longer with the organization.',
+      reviewedAt: new Date(),
+      issuedAt: new Date('2026-11-01T00:00:00.000Z'),
+      verificationId: 'b'.repeat(48),
+    };
+  };
+  ConnectAdminAudit.create = async (records) => { auditEntries.push(...records); };
+  Notification.create = async (records) => { notifications.push(...records); };
+  User.findById = () => ({ select: async () => ({ name: 'Kalma Associate', email: 'associate@example.com' }) });
+  require('mongoose').startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  const response = makeResponse();
+  try {
+    await idCardController.reviewIdCardRequest({
+      params: { requestId: issuedCard._id },
+      body: { status: 'revoked', reviewNote: 'Associate is no longer with the organization.' },
+      user: { _id: '507f1f77bcf86cd799439015' },
+    }, response, (error) => { throw error; });
+    assert.deepEqual(updateFilter, { _id: issuedCard._id, status: 'approved' });
+    assert.equal(update.$set.status, 'revoked');
+    assert.equal(update.$set.reviewNote, 'Associate is no longer with the organization.');
+    assert.equal(Object.hasOwn(update.$set, 'verificationId'), false);
+    assert.equal(auditEntries[0].action, 'connect_id_card_unissued');
+    assert.equal(notifications[0].title, 'Your ID card was unissued');
+    assert.match(notifications[0].message, /no longer with the organization/);
+    assert.equal(response.body.request.status, 'revoked');
+    assert.equal(response.body.request.photoUrl, '/api/admin/connect/id-cards/507f1f77bcf86cd799439014/photo');
+  } finally {
+    methods.forEach(([target, key], index) => { target[key] = originals[index]; });
+  }
+});
+
+test('admin cannot unissue a card that is not currently issued', async () => {
+  const originalFindById = ConnectIdCardRequest.findById;
+  const originalStartSession = require('mongoose').startSession;
+  ConnectIdCardRequest.findById = () => ({
+    select: async () => ({ status: 'pending' }),
+  });
+  require('mongoose').startSession = async () => {
+    throw new Error('A transaction should not start for a pending card.');
+  };
+  const response = makeResponse();
+  try {
+    await idCardController.reviewIdCardRequest({
+      params: { requestId: '507f1f77bcf86cd799439014' },
+      body: { status: 'revoked', reviewNote: 'No longer employed.' },
+      user: { _id: '507f1f77bcf86cd799439015' },
+    }, response, (error) => { throw error; });
+    assert.equal(response.statusCode, 409);
+    assert.match(response.body.message, /Only an issued ID card can be unissued/);
+  } finally {
+    ConnectIdCardRequest.findById = originalFindById;
+    require('mongoose').startSession = originalStartSession;
+  }
+});
+
+test('public card verification discloses only active issuance details for an unguessable token', async () => {
+  const originalFindOne = ConnectIdCardRequest.findOne;
+  const validToken = 'a'.repeat(48);
+  let filter;
+  ConnectIdCardRequest.findOne = (query) => {
+    filter = query;
+    return {
+      select() { return this; },
+      populate() { return this; },
+      lean: async () => ({
+        status: 'approved',
+        issuedAt: new Date('2026-11-17T00:00:00.000Z'),
+        userId: { name: 'Kalma Associate' },
+        associateId: {
+          status: 'active',
+          employeeId: 'KALMA-123ABC',
+          assignedRole: 'Customer Care Assistant',
+        },
+      }),
+    };
+  };
+  const response = makeResponse();
+  response.headers = {};
+  response.set = function setHeader(name, value) { this.headers[name] = value; return this; };
+  try {
+    await idCardController.verifyIssuedIdCard({ params: { verificationId: validToken } }, response, (error) => { throw error; });
+    assert.deepEqual(filter, { verificationId: validToken });
+    assert.deepEqual(response.body, {
+      verified: true,
+      status: 'active',
+      name: 'Kalma Associate',
+      employeeId: 'KALMA-123ABC',
+      role: 'Customer Care Assistant',
+      issuedAt: new Date('2026-11-17T00:00:00.000Z'),
+    });
+    assert.equal(response.headers['Cache-Control'], 'no-store');
+    assert.equal(Object.hasOwn(response.body, 'email'), false);
+  } finally {
+    ConnectIdCardRequest.findOne = originalFindOne;
+  }
+});
+
+test('public card verification rejects malformed tokens without database access', async () => {
+  const originalFindOne = ConnectIdCardRequest.findOne;
+  ConnectIdCardRequest.findOne = () => { throw new Error('Malformed token reached the database'); };
+  const response = makeResponse();
+  try {
+    await idCardController.verifyIssuedIdCard({ params: { verificationId: 'guessable' } }, response, (error) => { throw error; });
+    assert.equal(response.statusCode, 400);
+    assert.deepEqual(response.body, { verified: false, status: 'invalid' });
+  } finally {
+    ConnectIdCardRequest.findOne = originalFindOne;
+  }
+});
+
+test('public card verification reports unissued cards as no longer valid', async () => {
+  const originalFindOne = ConnectIdCardRequest.findOne;
+  ConnectIdCardRequest.findOne = () => ({
+    select() { return this; },
+    populate() { return this; },
+    lean: async () => ({
+      status: 'revoked',
+      issuedAt: new Date('2026-11-17T00:00:00.000Z'),
+      userId: { name: 'Kalma Associate' },
+      associateId: {
+        status: 'active',
+        employeeId: 'KALMA-123ABC',
+        assignedRole: 'Customer Care Assistant',
+      },
+    }),
+  });
+  const response = makeResponse();
+  response.set = function setHeader() { return this; };
+  try {
+    await idCardController.verifyIssuedIdCard({
+      params: { verificationId: 'c'.repeat(48) },
+    }, response, (error) => { throw error; });
+    assert.deepEqual(response.body, {
+      verified: false,
+      status: 'unissued',
+      name: 'Kalma Associate',
+      employeeId: 'KALMA-123ABC',
+      role: 'Customer Care Assistant',
+      issuedAt: new Date('2026-11-17T00:00:00.000Z'),
+    });
+  } finally {
+    ConnectIdCardRequest.findOne = originalFindOne;
   }
 });

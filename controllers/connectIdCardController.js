@@ -12,7 +12,7 @@ const {
   validatePrivateImage,
 } = require('../services/connectPrivateImages');
 
-const REVIEW_STATUSES = ['changes_requested', 'approved', 'rejected'];
+const REVIEW_STATUSES = ['changes_requested', 'approved', 'rejected', 'revoked'];
 
 function messageError(status, message) {
   const error = new Error(message);
@@ -60,9 +60,38 @@ const getMyIdCard = asyncHandler(async (req, res) => {
         name: user?.name || '',
         role: associate.assignedRole,
         issuedAt: request.issuedAt,
+        verificationId: request.verificationId,
         photoUrl: record.photoUrl,
       }
       : null,
+  });
+});
+
+const verifyIssuedIdCard = asyncHandler(async (req, res) => {
+  const { verificationId } = req.params;
+  if (!/^[a-f0-9]{48}$/.test(verificationId)) {
+    return res.status(400).json({ verified: false, status: 'invalid' });
+  }
+  res.set('Cache-Control', 'no-store');
+  const request = await ConnectIdCardRequest.findOne({ verificationId })
+    .select('status issuedAt userId associateId')
+    .populate('userId', 'name')
+    .populate('associateId', 'assignedRole employeeId status')
+    .lean();
+  if (!request) return res.json({ verified: false, status: 'not_found' });
+
+  const associate = request.associateId;
+  const active = request.status === 'approved'
+    && associate?.status === 'active'
+    && Boolean(associate.employeeId);
+  const status = request.status === 'revoked' ? 'unissued' : active ? 'active' : 'inactive';
+  return res.json({
+    verified: active,
+    status,
+    name: request.userId?.name || '',
+    employeeId: associate?.employeeId || '',
+    role: associate?.assignedRole || '',
+    issuedAt: request.issuedAt,
   });
 });
 
@@ -179,11 +208,12 @@ const getAdminIdCardPhoto = asyncHandler(async (req, res) => {
 
 const reviewIdCardRequest = asyncHandler(async (req, res) => {
   const { status, reviewNote = '' } = req.body || {};
+  const noteRequired = ['changes_requested', 'revoked'].includes(status);
   if (
     !REVIEW_STATUSES.includes(status)
     || typeof reviewNote !== 'string'
     || reviewNote.trim().length > 500
-    || (status === 'changes_requested' && !reviewNote.trim())
+    || (noteRequired && !reviewNote.trim())
   ) {
     return res.status(400).json({ message: 'Choose a valid ID card decision and include a note when requesting changes.' });
   }
@@ -192,8 +222,13 @@ const reviewIdCardRequest = asyncHandler(async (req, res) => {
   }
   const current = await ConnectIdCardRequest.findById(req.params.requestId).select('userId associateId status');
   if (!current) return res.status(404).json({ message: 'ID card request not found.' });
-  if (current.status !== 'pending') {
-    return res.status(409).json({ message: 'This ID card request is no longer waiting for review.' });
+  const expectedStatus = status === 'revoked' ? 'approved' : 'pending';
+  if (current.status !== expectedStatus) {
+    return res.status(409).json({
+      message: status === 'revoked'
+        ? 'Only an issued ID card can be unissued.'
+        : 'This ID card request is no longer waiting for review.',
+    });
   }
 
   const session = await mongoose.startSession();
@@ -214,14 +249,16 @@ const reviewIdCardRequest = asyncHandler(async (req, res) => {
         }
       }
       reviewed = await ConnectIdCardRequest.findOneAndUpdate(
-        { _id: current._id, status: 'pending' },
+        { _id: current._id, status: expectedStatus },
         {
           $set: {
             status,
             reviewNote: reviewNote.trim(),
             reviewedBy: req.user._id,
             reviewedAt: new Date(),
-            ...(status === 'approved' ? { issuedAt: new Date() } : {}),
+              ...(status === 'approved'
+                ? { issuedAt: new Date(), verificationId: crypto.randomBytes(24).toString('hex') }
+                : {}),
           },
         },
         { new: true, runValidators: true, session },
@@ -229,24 +266,30 @@ const reviewIdCardRequest = asyncHandler(async (req, res) => {
       if (!reviewed) throw messageError(409, 'This ID card request has already been reviewed.');
       await ConnectAdminAudit.create([{
         actorId: req.user._id,
-        action: 'connect_id_card_reviewed',
+        action: status === 'revoked' ? 'connect_id_card_unissued' : 'connect_id_card_reviewed',
         entityType: 'connect_id_card',
         entityId: reviewed._id,
         details: { status, reviewNote: reviewNote.trim(), employeeId: associate?.employeeId || null },
       }], { session });
-      const decisionText = (status === 'approved'
+      const decisionText = (status === 'revoked'
+        ? `Your Kalma Connect ID card has been unissued. Reason: ${reviewNote.trim()}`
+        : status === 'approved'
         ? `Your Kalma Connect associate ID card has been approved. Your staff ID is ${associate.employeeId}.`
         : status === 'changes_requested'
           ? `Please update your ID card request: ${reviewNote.trim()}`
           : `Your Kalma Connect associate ID card request was not approved.${reviewNote.trim() ? ` ${reviewNote.trim()}` : ''}`).slice(0, 500);
       await Notification.create([{
         userId: current.userId,
-        title: status === 'approved' ? 'Your associate ID card is ready' : 'Your ID card request was reviewed',
+        title: status === 'approved'
+          ? 'Your associate ID card is ready'
+          : status === 'revoked'
+            ? 'Your ID card was unissued'
+            : 'Your ID card request was reviewed',
         message: decisionText,
         category: 'System',
-        type: status === 'approved' ? 'success' : status === 'rejected' ? 'warning' : 'info',
+        type: status === 'approved' ? 'success' : ['rejected', 'revoked'].includes(status) ? 'warning' : 'info',
         icon: 'briefcase',
-        color: status === 'rejected' ? 'orange' : 'green',
+        color: ['rejected', 'revoked'].includes(status) ? 'orange' : 'green',
       }], { session });
     });
   } finally {
@@ -269,4 +312,5 @@ module.exports = {
   listAdminIdCards,
   reviewIdCardRequest,
   submitIdCardRequest,
+  verifyIssuedIdCard,
 };

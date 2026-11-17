@@ -89,6 +89,8 @@ test('Connect APIs require an authenticated account and signup rejects malformed
     assert.equal(adminInboxResponse.status, 401);
     const adminIdCardsResponse = await fetch(`${baseUrl}/api/admin/connect/id-cards`);
     assert.equal(adminIdCardsResponse.status, 401);
+    const invalidCardVerificationResponse = await fetch(`${baseUrl}/api/connect/id-cards/verify/not-a-token`);
+    assert.equal(invalidCardVerificationResponse.status, 400);
     const reactionResponse = await fetch(`${baseUrl}/api/connect/opportunities/507f1f77bcf86cd799439011/reaction`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },

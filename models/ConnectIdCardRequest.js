@@ -8,6 +8,7 @@ const connectIdCardRequestSchema = new mongoose.Schema(
     photoPublicId: { type: String, required: true, trim: true, maxlength: 240 },
     photoFormat: { type: String, required: true, enum: ['jpg', 'png', 'webp'] },
     photoBytes: { type: Number, required: true, min: 1, max: 2097152 },
+    verificationId: { type: String, default: null, match: /^[a-f0-9]{48}$/ },
     status: {
       type: String,
       enum: ['pending', 'changes_requested', 'approved', 'rejected', 'revoked'],
@@ -28,5 +29,9 @@ connectIdCardRequestSchema.index(
   { unique: true, partialFilterExpression: { status: 'pending' }, name: 'one_pending_connect_id_card_per_user' },
 );
 connectIdCardRequestSchema.index({ status: 1, createdAt: 1 });
+connectIdCardRequestSchema.index(
+  { verificationId: 1 },
+  { unique: true, partialFilterExpression: { verificationId: { $type: 'string' } }, name: 'connect_id_card_verification_id' },
+);
 
 module.exports = mongoose.model('ConnectIdCardRequest', connectIdCardRequestSchema);

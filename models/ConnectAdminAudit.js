@@ -10,6 +10,7 @@ const connectAdminAuditSchema = new mongoose.Schema(
         'application_message_sent',
         'connect_id_card_submitted',
         'connect_id_card_reviewed',
+        'connect_id_card_unissued',
         'partner_status_changed',
         'commission_reviewed',
         'payout_reviewed',
