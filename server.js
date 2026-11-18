@@ -25,6 +25,7 @@ const { createRegistrationCommission } = require('./services/connectCommissions'
 const ensureConnectApplicationIndexes = require('./services/connectApplicationIndexes');
 const ensureConnectCommunicationIndexes = require('./services/connectCommunicationIndexes');
 const ensureConnectIdCardIndexes = require('./services/connectIdCardIndexes');
+const ensureNameChangeIndexes = require('./services/ensureNameChangeIndexes');
 const { handlePaystackWebhook } = require('./controllers/walletController');
 
 const app = express();
@@ -323,6 +324,7 @@ async function startServer() {
   await ensureConnectApplicationIndexes();
   await ensureConnectCommunicationIndexes();
   await ensureConnectIdCardIndexes();
+  await ensureNameChangeIndexes();
   await ensureDefaultAdminUser();
   startCoreSavingsScheduler();
   return app.listen(PORT, () => {

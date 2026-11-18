@@ -316,13 +316,23 @@ const createPayoutRequest = asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(linkedBankId)) {
     return res.status(400).json({ message: 'Choose a linked bank account.' });
   }
-  const [partner, bank, policy] = await Promise.all([
+  const [partner, bank, policy, user] = await Promise.all([
     ConnectPartner.findOne({ userId: req.user._id, status: 'active' }),
-    LinkedBankAccount.findOne({ _id: linkedBankId, userId: req.user._id }).select('_id bankName accountLast4'),
+    LinkedBankAccount.findOne({ _id: linkedBankId, userId: req.user._id }).select('_id bankName accountName accountLast4'),
     getPolicy(),
+    User.findById(req.user._id).select('name'),
   ]);
   if (!partner) return res.status(403).json({ message: 'An active Connect Partner account is required.' });
   if (!bank) return res.status(400).json({ message: 'Choose one of your linked bank accounts.' });
+  if (
+    !user?.name
+    || !bank.accountName
+    || normalizeAccountName(bank.accountName) !== normalizeAccountName(user.name)
+  ) {
+    return res.status(409).json({
+      message: 'Your linked bank account name no longer matches your updated legal name. Remove and relink a bank account with the matching name before requesting a Connect withdrawal.',
+    });
+  }
   if (amountNaira < policy.minimumPayoutNaira) {
     return res.status(400).json({ message: `The minimum withdrawal is ₦${policy.minimumPayoutNaira.toLocaleString()}.` });
   }

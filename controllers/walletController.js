@@ -509,9 +509,14 @@ async function createWithdrawal(req, res, next) {
       const linkedBank = await LinkedBankAccount.findOne({
         _id: linkedBankAccountId,
         userId: req.user.id,
-      }).select('+recipientCode');
+      }).select('+recipientCode accountName');
       if (!linkedBank) {
         return res.status(404).json({ message: 'The selected linked bank account was not found.' });
+      }
+      if (normalizeAccountName(linkedBank.accountName || '') !== normalizeAccountName(user.name || '')) {
+        return res.status(409).json({
+          message: 'Your linked bank account name no longer matches your updated legal name. Remove and relink a bank account with the matching name before withdrawing.',
+        });
       }
       account = {
         accountName: linkedBank.accountName,

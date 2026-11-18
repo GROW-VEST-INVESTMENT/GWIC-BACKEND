@@ -3,6 +3,8 @@ const AdminAuditLog = require('../models/AdminAuditLog');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
+const NameChangeRequest = require('../models/NameChangeRequest');
+const Notification = require('../models/Notification');
 const TransactionTierPolicy = require('../models/TransactionTierPolicy');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
@@ -19,6 +21,7 @@ const {
 
 const VERIFICATION_STATUSES = ['pending', 'verified', 'rejected'];
 const SUPPORT_STATUSES = ['open', 'in_progress', 'resolved'];
+const NAME_CHANGE_STATUSES = ['pending', 'approved', 'rejected'];
 const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
 const formatTransaction = (transaction) => ({
   id: transaction.reference,
@@ -718,6 +721,152 @@ async function reviewVerification(req, res, next) {
   }
 }
 
+async function listNameChangeRequests(req, res, next) {
+  const status = req.query.status || 'pending';
+  if (!['all', ...NAME_CHANGE_STATUSES].includes(status)) {
+    return res.status(400).json({ message: 'Choose all, pending, approved, or rejected status.' });
+  }
+
+  try {
+    const filter = status === 'all' ? {} : { status };
+    const [requests, pending, approved, rejected] = await Promise.all([
+      NameChangeRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .populate('userId', 'name email phone')
+        .lean(),
+      NameChangeRequest.countDocuments({ status: 'pending' }),
+      NameChangeRequest.countDocuments({ status: 'approved' }),
+      NameChangeRequest.countDocuments({ status: 'rejected' }),
+    ]);
+    return res.json({
+      stats: { pending, approved, rejected },
+      requests: requests.map((request) => ({
+        id: request._id.toString(),
+        user: request.userId ? {
+          id: request.userId._id.toString(),
+          name: request.userId.name,
+          email: request.userId.email,
+          phone: request.userId.phone || '',
+        } : null,
+        currentName: request.currentName,
+        requestedName: request.requestedName,
+        reason: request.reason,
+        status: request.status,
+        reviewNote: request.reviewNote || '',
+        identityCheckConfirmed: request.identityCheckConfirmed === true,
+        createdAt: request.createdAt,
+        reviewedAt: request.reviewedAt,
+      })),
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function reviewNameChangeRequest(req, res, next) {
+  const { decision, note, identityConfirmed } = req.body || {};
+  const normalizedNote = typeof note === 'string' ? note.trim() : '';
+  if (
+    !['approved', 'rejected'].includes(decision)
+    || normalizedNote.length < 3
+    || normalizedNote.length > 1000
+  ) {
+    return res.status(400).json({
+      message: 'Choose approved or rejected and provide a review note between 3 and 1,000 characters.',
+    });
+  }
+  if (decision === 'approved' && identityConfirmed !== true) {
+    return res.status(400).json({
+      message: 'Approval requires confirmation that the requested legal name was checked through an approved identity-verification process.',
+    });
+  }
+  if (!isValidObjectId(req.params.requestId)) {
+    return res.status(400).json({ message: 'Invalid name-correction request ID.' });
+  }
+
+  const session = await mongoose.startSession();
+  try {
+    let reviewed;
+    await session.withTransaction(async () => {
+      const request = await NameChangeRequest.findOne({
+        _id: req.params.requestId,
+        status: 'pending',
+      }).session(session);
+      if (!request) {
+        const error = new Error('Pending name-correction request not found.');
+        error.status = 404;
+        throw error;
+      }
+
+      const user = await User.findById(request.userId).session(session);
+      if (!user) {
+        const error = new Error('Account for this name-correction request was not found.');
+        error.status = 404;
+        throw error;
+      }
+      const normalizeName = (name) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+      if (normalizeName(user.name) !== normalizeName(request.currentName)) {
+        const error = new Error('The account name changed after this request was submitted. Do not approve it; ask the customer to submit a new request.');
+        error.status = 409;
+        throw error;
+      }
+
+      const previousStatus = request.status;
+      if (decision === 'approved') {
+        user.name = request.requestedName;
+        await user.save({ session });
+      }
+      request.status = decision;
+      request.reviewNote = normalizedNote;
+      request.reviewedBy = req.user.id;
+      request.reviewedAt = new Date();
+      request.identityCheckConfirmed = decision === 'approved';
+      await request.save({ session });
+      await new AdminAuditLog({
+        actorId: req.user.id,
+        action: 'account.name_change_reviewed',
+        targetType: 'name_change_request',
+        targetId: request._id,
+        previousStatus,
+        nextStatus: decision,
+        note: normalizedNote,
+        identityCheckConfirmed: decision === 'approved',
+      }).save({ session });
+      await new Notification({
+        userId: request.userId,
+        title: decision === 'approved' ? 'Name correction approved' : 'Name correction not approved',
+        message: decision === 'approved'
+          ? `Your account name has been updated to ${request.requestedName}. Previously linked bank accounts may need to be removed and relinked with the matching account-holder name before withdrawals.`
+          : `Your name-correction request was not approved. Review the administrator’s note in your profile and submit a new request if needed.`,
+        category: 'System',
+        type: decision === 'approved' ? 'success' : 'warning',
+        icon: 'person',
+        color: decision === 'approved' ? 'green' : 'orange',
+      }).save({ session });
+      reviewed = {
+        id: request.id,
+        currentName: request.currentName,
+        requestedName: request.requestedName,
+        status: request.status,
+        reviewNote: request.reviewNote,
+        identityCheckConfirmed: request.identityCheckConfirmed,
+        reviewedAt: request.reviewedAt,
+      };
+    });
+    return res.json({
+      message: decision === 'approved'
+        ? 'Name-correction request approved and the account name updated.'
+        : 'Name-correction request rejected.',
+      request: reviewed,
+    });
+  } catch (error) {
+    return next(error);
+  } finally {
+    await session.endSession();
+  }
+}
+
 async function listSupportRequests(req, res, next) {
   const status = req.query.status || 'all';
   if (!['all', ...SUPPORT_STATUSES].includes(status)) {
@@ -834,6 +983,7 @@ async function listAuditLogs(_req, res, next) {
         nextStatus: entry.nextStatus,
         note: entry.note,
         evidenceReviewed: entry.evidenceReviewed,
+        identityCheckConfirmed: entry.identityCheckConfirmed,
         createdAt: entry.createdAt,
       })),
     });
@@ -852,7 +1002,9 @@ module.exports = {
   listTransactions,
   listUsers,
   listVerificationRequests,
+  listNameChangeRequests,
   reviewVerification,
+  reviewNameChangeRequest,
   updateAccountStatus,
   updateTransactionTierPolicy,
   updateUserTransactionTier,

@@ -9,6 +9,8 @@ const ConnectReferral = require('../models/ConnectReferral');
 const InvestmentPlan = require('../models/InvestmentPlan');
 const SavingsGoal = require('../models/SavingsGoal');
 const SupportRequest = require('../models/SupportRequest');
+const NameChangeRequest = require('../models/NameChangeRequest');
+const Notification = require('../models/Notification');
 const TransactionTierPolicy = require('../models/TransactionTierPolicy');
 const User = require('../models/User');
 const VerificationRequest = require('../models/VerificationRequest');
@@ -21,6 +23,7 @@ const {
   updateUserTransactionTier,
   updateTransactionRestriction,
   updateSupportRequest,
+  reviewNameChangeRequest,
 } = require('../controllers/adminController');
 const { listDepositReviews, reviewDeposit } = require('../controllers/walletController');
 
@@ -406,6 +409,78 @@ test('KYC decisions require evidence confirmation and a meaningful reviewer note
       (error) => { throw error; },
     );
     assert.equal(response.statusCode, 400);
+  }
+});
+
+test('name-correction approval requires an identity-check attestation and reviewer note', async () => {
+  for (const body of [
+    { decision: 'approved', note: 'Checked identity', identityConfirmed: false },
+    { decision: 'approved', note: 'No', identityConfirmed: true },
+    { decision: 'pending', note: 'Checked identity', identityConfirmed: true },
+  ]) {
+    const response = makeResponse();
+    await reviewNameChangeRequest(
+      { body, params: { requestId: '507f1f77bcf86cd799439011' } },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 400);
+  }
+});
+
+test('name-correction approval updates the user, request, audit record, and notification', async () => {
+  const originalStartSession = mongoose.startSession;
+  const originalFindOne = NameChangeRequest.findOne;
+  const originalFindById = User.findById;
+  const originalAuditSave = AdminAuditLog.prototype.save;
+  const originalNotificationSave = Notification.prototype.save;
+  const request = {
+    id: '507f1f77bcf86cd799439012',
+    _id: '507f1f77bcf86cd799439012',
+    userId: '507f1f77bcf86cd799439013',
+    currentName: 'Ada Example',
+    requestedName: 'Ada Smith',
+    status: 'pending',
+    save: async () => {},
+  };
+  const user = {
+    name: 'Ada Example',
+    save: async () => {},
+  };
+  const auditRecords = [];
+  const notifications = [];
+  mongoose.startSession = async () => ({
+    withTransaction: async (callback) => callback(),
+    endSession: async () => {},
+  });
+  NameChangeRequest.findOne = () => ({ session: async () => request });
+  User.findById = () => ({ session: async () => user });
+  AdminAuditLog.prototype.save = async function save() { auditRecords.push(this); };
+  Notification.prototype.save = async function save() { notifications.push(this); };
+  try {
+    const response = makeResponse();
+    await reviewNameChangeRequest(
+      {
+        user: { id: '507f1f77bcf86cd799439014' },
+        body: { decision: 'approved', note: 'Identity reviewed and confirmed.', identityConfirmed: true },
+        params: { requestId: '507f1f77bcf86cd799439012' },
+      },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 200);
+    assert.equal(user.name, 'Ada Smith');
+    assert.equal(request.status, 'approved');
+    assert.equal(request.identityCheckConfirmed, true);
+    assert.equal(auditRecords[0].action, 'account.name_change_reviewed');
+    assert.equal(auditRecords[0].identityCheckConfirmed, true);
+    assert.equal(notifications[0].userId.toString(), request.userId.toString());
+  } finally {
+    mongoose.startSession = originalStartSession;
+    NameChangeRequest.findOne = originalFindOne;
+    User.findById = originalFindById;
+    AdminAuditLog.prototype.save = originalAuditSave;
+    Notification.prototype.save = originalNotificationSave;
   }
 });
 

@@ -34,7 +34,7 @@ The API starts a UTC-midnight scheduler after connecting to MongoDB; it also run
 
 ## Account settings and support
 
-Signup requires at least a first and last name. Tell users to enter their full legal name as it appears on bank and identity records: bank withdrawals are rejected when the verified bank-account holder name does not match the Kalma Capital profile name. The name is immutable through the regular profile endpoint; users can submit a support request for a correction.
+Signup requires at least a first and last name. Tell users to enter their full legal name as it appears on bank and identity records: bank withdrawals are rejected when the verified bank-account holder name does not match the Kalma Capital profile name. The name is immutable through the regular profile endpoint; users can submit a dedicated name-correction request for administrator review. Approval requires an explicit identity-check attestation and updates the account name, request, audit record, and customer notification in one MongoDB transaction. No identity documents are uploaded through this workflow. After approval, previously linked bank accounts whose holder name does not match the corrected profile name cannot be used for wallet or Connect withdrawals; the customer must remove and relink a matching bank account.
 
 Optional profile photos are uploaded through the authenticated `/api/account/profile/photo` route and stored as authenticated Cloudinary images. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend environment. Only PNG, JPEG, and WebP files under 2 MB are accepted. The API returns a signed image URL; photos are not identity evidence and must not be used for face verification. `DELETE /api/account/profile/photo` removes the current profile photo. The Kalma Connect portal uses these same endpoints from My Profile and displays the account initial when no photo is set.
 
@@ -44,7 +44,8 @@ Connect application inbox messages may contain text, up to three PNG/JPEG/WebP i
 
 The authenticated `/api/account` routes power the More page:
 
-- `GET/PATCH /profile` reads the account name and updates the phone. The legal account name is fixed after signup; correction requests must go through support. Email changes are not supported by this endpoint.
+- `GET/PATCH /profile` reads the account name and updates the phone. The legal account name is fixed after signup; corrections use the separate request workflow below. Email changes are not supported by this endpoint.
+- `GET/POST /name-change` reads the current name and latest request or submits a requested full legal name and reason. Only one request may be pending per account; a previous rejected or approved request does not prevent a new request.
 - `GET/PATCH /preferences` persists wallet-balance visibility and the available display preferences.
 - `GET/PATCH /notifications` persists the user's choices. Email and push delivery are not integrated yet; saving a choice does not send a notification.
 - `PATCH /password` verifies the current password, changes it, invalidates prior sessions, and clears the current session cookie.
@@ -81,8 +82,9 @@ The authenticated staff API is under `/api/admin`:
 - `PATCH /users/:userId/transaction-restriction` requires a boolean `restricted` value and a 3–500 character reason. It temporarily blocks new deposits, withdrawal initiation/account resolution, linked-bank changes, new Core savings plans, and plan liquidation while preserving account viewing, support, existing balances/plans, deposit verification, and Paystack webhooks. Customer accounts are never locked out; only non-staff accounts can be restricted. Each state change and reason is saved with the user update in one MongoDB transaction. Requests already in progress at the time of restriction may complete; review pending withdrawals separately.
 - `GET /operations/wallets` provides read-only wallet totals and recent balances.
 - `GET /operations/verification-requests?status=pending` lists submitted requests. `PATCH /operations/verification-requests/:requestId` requires a decision, an evidence-review confirmation, and a reviewer note. Identity documents are not collected by this app; review evidence only through an approved secure process.
+- `GET /operations/name-change-requests?status=pending` lists name-correction requests. `PATCH /operations/name-change-requests/:requestId` requires an approval/rejection decision and review note; approval additionally requires `identityConfirmed: true`. Approval updates the customer account name and records the notification and audit event atomically.
 - `GET /operations/support-requests?status=all` lists real support tickets. `PATCH /operations/support-requests/:requestId` changes status with a required staff note.
-- `GET /operations/audit-logs` lists recorded KYC, support, and transaction-access actions. Mutations and audit entries are saved in one MongoDB transaction.
+- `GET /operations/audit-logs` lists recorded KYC, support, name-correction, and transaction-access actions. Mutations and audit entries are saved in one MongoDB transaction.
 
 Admin write routes require a valid admin session, admin role, and an approved request origin. Wallets remain read-only.
 

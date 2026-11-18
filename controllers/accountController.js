@@ -6,6 +6,7 @@ const LinkedBankAccount = require('../models/LinkedBankAccount');
 const ConnectPayout = require('../models/ConnectPayout');
 const VerificationRequest = require('../models/VerificationRequest');
 const SupportRequest = require('../models/SupportRequest');
+const NameChangeRequest = require('../models/NameChangeRequest');
 const { paystackRequest } = require('../services/paystack');
 const {
   deleteProfilePhoto,
@@ -94,11 +95,12 @@ async function getProfile(req, res, next) {
 async function updateProfile(req, res, next) {
   const body = req.body || {};
   if (Object.hasOwn(body, 'name')) {
-    return sendError(res, 400, 'Your account name cannot be changed here. Contact support to request a correction.');
+    return sendError(res, 400, 'Your account name cannot be changed here. Submit a name-correction request for administrator review.');
   }
   if (Object.keys(body).some((key) => key !== 'phone')) {
-    return sendError(res, 400, 'Only your phone number can be updated here. Contact support to request a name correction.');
+    return sendError(res, 400, 'Only your phone number can be updated here. Submit a name-correction request to change your account name.');
   }
+
   if (!Object.keys(body).length) return sendError(res, 400, 'Provide a phone number to update.');
 
   const updates = {};
@@ -124,6 +126,80 @@ async function updateProfile(req, res, next) {
       message: 'Your profile has been updated.',
       profile: serializeProfile(user),
     });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+function serializeNameChangeRequest(request) {
+  if (!request) return null;
+  return {
+    id: request._id.toString(),
+    currentName: request.currentName,
+    requestedName: request.requestedName,
+    reason: request.reason,
+    status: request.status,
+    reviewNote: request.reviewNote || '',
+    createdAt: request.createdAt,
+    reviewedAt: request.reviewedAt,
+  };
+}
+
+async function getNameChangeRequest(req, res, next) {
+  try {
+    const [user, request] = await Promise.all([
+      User.findById(req.user.id).select('name'),
+      NameChangeRequest.findOne({ userId: req.user.id }).sort({ createdAt: -1 }),
+    ]);
+    if (!user) return sendError(res, 404, 'Account not found.');
+    return res.json({ currentName: user.name, request: serializeNameChangeRequest(request) });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function createNameChangeRequest(req, res, next) {
+  const { requestedName, reason } = req.body || {};
+  const normalizedName = typeof requestedName === 'string'
+    ? requestedName.trim().replace(/\s+/g, ' ')
+    : '';
+  const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+  if (
+    normalizedName.length < 3
+    || normalizedName.length > 100
+    || normalizedName.split(' ').length < 2
+    || normalizedReason.length < 10
+    || normalizedReason.length > 1000
+    || Object.keys(req.body || {}).some((key) => !['requestedName', 'reason'].includes(key))
+  ) {
+    return sendError(res, 400, 'Enter your full legal name and a reason between 10 and 1,000 characters.');
+  }
+
+  try {
+    const user = await User.findById(req.user.id).select('name');
+    if (!user) return sendError(res, 404, 'Account not found.');
+    const normalized = (name) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (normalized(normalizedName) === normalized(user.name)) {
+      return sendError(res, 400, 'The requested name must be different from your current account name.');
+    }
+
+    try {
+      const request = await NameChangeRequest.create({
+        userId: req.user.id,
+        currentName: user.name,
+        requestedName: normalizedName,
+        reason: normalizedReason,
+      });
+      return res.status(201).json({
+        message: 'Your name-correction request was submitted for administrator review.',
+        request: serializeNameChangeRequest(request),
+      });
+    } catch (error) {
+      if (error.code === 11000) {
+        return sendError(res, 409, 'You already have a name-correction request awaiting review.');
+      }
+      throw error;
+    }
   } catch (error) {
     return next(error);
   }
@@ -669,6 +745,8 @@ function getAbout(_req, res) {
 module.exports = {
   getProfile,
   updateProfile,
+  getNameChangeRequest,
+  createNameChangeRequest,
   uploadAccountPhoto,
   removeAccountPhoto,
   getPreferences,

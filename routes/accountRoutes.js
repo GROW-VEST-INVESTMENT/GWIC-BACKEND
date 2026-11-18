@@ -21,6 +21,8 @@ const {
   listSupportRequests,
   createSupportRequest,
   getAbout,
+  getNameChangeRequest,
+  createNameChangeRequest,
 } = require('../controllers/accountController');
 
 const router = express.Router();
@@ -46,6 +48,8 @@ router.use(requireAuth);
 router.get('/about', getAbout);
 router.get('/profile', getProfile);
 router.patch('/profile', updateProfile);
+router.get('/name-change', getNameChangeRequest);
+router.post('/name-change', createNameChangeRequest);
 router.post('/profile/photo', receiveProfilePhoto, uploadAccountPhoto);
 router.delete('/profile/photo', removeAccountPhoto);
 router.patch('/password', changePassword);

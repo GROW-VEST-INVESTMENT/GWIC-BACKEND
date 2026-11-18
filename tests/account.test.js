@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const {
   updateProfile,
+  createNameChangeRequest,
   updatePreferences,
   createVerificationRequest,
   createSupportRequest,
@@ -11,6 +12,7 @@ const {
 const requireAccountReviewer = require('../middleware/requireAccountReviewer');
 const User = require('../models/User');
 const LinkedBankAccount = require('../models/LinkedBankAccount');
+const NameChangeRequest = require('../models/NameChangeRequest');
 const bcrypt = require('bcryptjs');
 
 function makeResponse() {
@@ -33,6 +35,78 @@ test('profile updates cannot change the account name', async () => {
   await updateProfile({ body: { name: 'New Legal Name' } }, response, (error) => { throw error; });
   assert.equal(response.statusCode, 400);
   assert.match(response.body.message, /name cannot be changed/i);
+});
+
+test('name-correction submissions require a different full name and a reason', async () => {
+  const response = makeResponse();
+  await createNameChangeRequest(
+    { user: { id: '507f1f77bcf86cd799439011' }, body: { requestedName: 'Ada', reason: 'Correct it please.' } },
+    response,
+    (error) => { throw error; },
+  );
+  assert.equal(response.statusCode, 400);
+});
+
+test('name-correction submissions create a pending request without changing the user name', async () => {
+  const originalFindById = User.findById;
+  const originalCreate = NameChangeRequest.create;
+  const user = { name: 'Ada Example' };
+  let created;
+  User.findById = () => ({ select: async () => user });
+  NameChangeRequest.create = async (value) => {
+    created = value;
+    return {
+      ...value,
+      _id: { toString: () => '507f1f77bcf86cd799439012' },
+      status: 'pending',
+      createdAt: new Date('2025-01-01T00:00:00Z'),
+    };
+  };
+  try {
+    const response = makeResponse();
+    await createNameChangeRequest(
+      {
+        user: { id: '507f1f77bcf86cd799439011' },
+        body: { requestedName: '  Ada   Example Smith ', reason: 'My legal name was updated.' },
+      },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 201);
+    assert.equal(created.currentName, 'Ada Example');
+    assert.equal(created.requestedName, 'Ada Example Smith');
+    assert.equal(response.body.request.status, 'pending');
+    assert.equal(user.name, 'Ada Example');
+  } finally {
+    User.findById = originalFindById;
+    NameChangeRequest.create = originalCreate;
+  }
+});
+
+test('name-correction submissions cannot create a duplicate pending request', async () => {
+  const originalFindById = User.findById;
+  const originalCreate = NameChangeRequest.create;
+  User.findById = () => ({ select: async () => ({ name: 'Ada Example' }) });
+  NameChangeRequest.create = async () => {
+    const error = new Error('Duplicate pending request');
+    error.code = 11000;
+    throw error;
+  };
+  try {
+    const response = makeResponse();
+    await createNameChangeRequest(
+      {
+        user: { id: '507f1f77bcf86cd799439011' },
+        body: { requestedName: 'Ada Smith', reason: 'My legal name was updated.' },
+      },
+      response,
+      (error) => { throw error; },
+    );
+    assert.equal(response.statusCode, 409);
+  } finally {
+    User.findById = originalFindById;
+    NameChangeRequest.create = originalCreate;
+  }
 });
 
 test('profile updates reject email changes', async () => {

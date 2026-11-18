@@ -11,6 +11,7 @@ const adminAuditLogSchema = new mongoose.Schema(
         'account.transaction_access_updated',
         'account.status_updated',
         'account.tier_updated',
+        'account.name_change_reviewed',
         'transaction.deposit_reviewed',
         'transaction_tier.policy_updated',
       ],
@@ -18,7 +19,7 @@ const adminAuditLogSchema = new mongoose.Schema(
     },
     targetType: {
       type: String,
-      enum: ['verification_request', 'support_request', 'user', 'wallet_transaction', 'transaction_tier_policy'],
+      enum: ['verification_request', 'support_request', 'name_change_request', 'user', 'wallet_transaction', 'transaction_tier_policy'],
       required: true,
     },
     targetId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
@@ -26,6 +27,7 @@ const adminAuditLogSchema = new mongoose.Schema(
     nextStatus: { type: String, required: true },
     note: { type: String, required: true, trim: true, maxlength: 1000 },
     evidenceReviewed: { type: Boolean, default: false },
+    identityCheckConfirmed: { type: Boolean, default: false },
   },
   { timestamps: true },
 );
